@@ -12,6 +12,13 @@ import {
   listKnowledge, buildSystemPrompt, bulkSetup,
   setSecret, deleteSecret, listSecretKeys, hasSecret,
 } from "../config/knowledge.js";
+import {
+  registerTool, updateTool, deleteTool, getTool,
+  listTools, buildDynamicTools,
+} from "../config/tool-store.js";
+import {
+  getEnabledBuiltins, listBuiltins, enableBuiltin, disableBuiltin,
+} from "../tools/builtins/index.js";
 import { getSessionStore } from "../session/index.js";
 import type { SessionData } from "../session/store.js";
 import { AgentRequestSchema, type AgentRequestBody } from "./validation.js";
@@ -21,7 +28,7 @@ export const app = new Hono();
 const DEFAULT_PROVIDER = process.env.DEFAULT_PROVIDER ?? "openai";
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL;
 
-// CORS — allow Vite dev server and any configured origins
+// CORS
 app.use("/api/*", cors({
   origin: (origin) => {
     const allowed = process.env.CORS_ORIGIN;
@@ -31,11 +38,12 @@ app.use("/api/*", cors({
     }
     return "";
   },
-  allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "Authorization"],
 }));
 
-// Shared resolution for both endpoints
+// ── Shared resolution ──
+
 async function resolveRequest(data: AgentRequestBody, agentDef: AgentDef) {
   const provider = data.provider ?? agentDef.provider ?? DEFAULT_PROVIDER;
   const modelId = data.model ?? agentDef.model ?? DEFAULT_MODEL;
@@ -51,11 +59,12 @@ async function resolveRequest(data: AgentRequestBody, agentDef: AgentDef) {
   }
 
   const store = getSessionStore();
+  const userId = data.userId;
   let session: SessionData | null = null;
   const currentKey = data.sessionKey ?? randomUUID();
 
   if (data.sessionKey) {
-    session = await store.load(data.sessionKey);
+    session = await store.load(data.sessionKey, userId);
     if (!session) {
       return { error: `Session not found: ${data.sessionKey}` } as const;
     }
@@ -63,7 +72,14 @@ async function resolveRequest(data: AgentRequestBody, agentDef: AgentDef) {
 
   const maxTurns = data.maxTurns ?? agentDef.maxTurns ?? (Number(process.env.MAX_TURNS) || 10);
 
-  return { model, session, currentKey, maxTurns } as const;
+  // Merge all tool sources: config + dynamic + builtins
+  const allTools = [
+    ...agentDef.tools,
+    ...buildDynamicTools(agentDef.name),
+    ...getEnabledBuiltins({ userId, sessionKey: currentKey }),
+  ];
+
+  return { model, session, currentKey, maxTurns, userId, allTools } as const;
 }
 
 function resolveAgent(data: AgentRequestBody) {
@@ -79,12 +95,34 @@ function resolveAgent(data: AgentRequestBody) {
   return agentDef;
 }
 
-// Health check
+async function saveSession(
+  currentKey: string, userId: string, agentName: string,
+  messages: any[], existingSession: SessionData | null
+) {
+  const store = getSessionStore();
+  await store.save({
+    id: currentKey,
+    userId,
+    toolSet: agentName,
+    messages,
+    createdAt: existingSession?.createdAt ?? Date.now(),
+    updatedAt: Date.now(),
+  });
+}
+
+// ── Health ──
+
 app.get("/api/health", (c) => {
-  return c.json({ status: "ok", agents: listAgents(), defaultProvider: DEFAULT_PROVIDER, defaultModel: DEFAULT_MODEL });
+  return c.json({
+    status: "ok",
+    agents: listAgents(),
+    defaultProvider: DEFAULT_PROVIDER,
+    defaultModel: DEFAULT_MODEL,
+  });
 });
 
-// Main agent endpoint
+// ── Agent (non-streaming) ──
+
 app.post("/api/agent", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
@@ -98,7 +136,7 @@ app.post("/api/agent", async (c) => {
   const resolved = await resolveRequest(parsed.data, agentDef);
   if ("error" in resolved) return c.json(resolved, 400);
 
-  const { model, session, currentKey, maxTurns } = resolved;
+  const { model, session, currentKey, maxTurns, userId, allTools } = resolved;
   const timeoutMs = Number(process.env.TIMEOUT_MS) || 120_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -107,20 +145,13 @@ app.post("/api/agent", async (c) => {
     const result = await runAgent(parsed.data.prompt, {
       model,
       systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
-      tools: agentDef.tools,
+      tools: allTools,
       messages: session?.messages,
       maxTurns,
       signal: controller.signal,
     });
 
-    const store = getSessionStore();
-    await store.save({
-      id: currentKey,
-      toolSet: agentDef.name,
-      messages: result.messages,
-      createdAt: session?.createdAt ?? Date.now(),
-      updatedAt: Date.now(),
-    });
+    await saveSession(currentKey, userId, agentDef.name, result.messages, session);
 
     return c.json({
       sessionKey: currentKey,
@@ -140,7 +171,8 @@ app.post("/api/agent", async (c) => {
   }
 });
 
-// Streaming agent endpoint — SSE
+// ── Agent (streaming SSE) ──
+
 app.post("/api/agent/stream", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
@@ -154,7 +186,7 @@ app.post("/api/agent/stream", async (c) => {
   const resolved = await resolveRequest(parsed.data, agentDef);
   if ("error" in resolved) return c.json(resolved, 400);
 
-  const { model, session, currentKey, maxTurns } = resolved;
+  const { model, session, currentKey, maxTurns, userId, allTools } = resolved;
   const timeoutMs = Number(process.env.TIMEOUT_MS) || 120_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -164,7 +196,7 @@ app.post("/api/agent/stream", async (c) => {
       const events = runAgentStream(parsed.data.prompt, {
         model,
         systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
-        tools: agentDef.tools,
+        tools: allTools,
         messages: session?.messages,
         maxTurns,
         signal: controller.signal,
@@ -182,17 +214,9 @@ app.post("/api/agent/stream", async (c) => {
         });
       }
 
-      // Save session — messages returned from the generator
       const messages = returnValue?.value;
       if (messages && messages.length > 0) {
-        const store = getSessionStore();
-        await store.save({
-          id: currentKey,
-          toolSet: agentDef.name,
-          messages,
-          createdAt: session?.createdAt ?? Date.now(),
-          updatedAt: Date.now(),
-        });
+        await saveSession(currentKey, userId, agentDef.name, messages, session);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -206,10 +230,21 @@ app.post("/api/agent/stream", async (c) => {
   });
 });
 
-// Get session history
-app.get("/api/sessions/:id", async (c) => {
+// ── Sessions ──
+
+app.get("/api/sessions", async (c) => {
+  const userId = c.req.query("userId");
+  if (!userId) return c.json({ error: "userId query param required" }, 400);
   const store = getSessionStore();
-  const session = await store.load(c.req.param("id"));
+  const sessions = await store.list(userId);
+  return c.json({ sessions });
+});
+
+app.get("/api/sessions/:id", async (c) => {
+  const userId = c.req.query("userId");
+  if (!userId) return c.json({ error: "userId query param required" }, 400);
+  const store = getSessionStore();
+  const session = await store.load(c.req.param("id"), userId);
   if (!session) return c.json({ error: "Session not found" }, 404);
   return c.json({
     id: session.id,
@@ -220,45 +255,70 @@ app.get("/api/sessions/:id", async (c) => {
   });
 });
 
-// Delete session
 app.delete("/api/sessions/:id", async (c) => {
+  const userId = c.req.query("userId");
+  if (!userId) return c.json({ error: "userId query param required" }, 400);
   const store = getSessionStore();
-  await store.delete(c.req.param("id"));
+  await store.delete(c.req.param("id"), userId);
   return c.json({ ok: true });
 });
 
-// List sessions
-app.get("/api/sessions", async (c) => {
-  const store = getSessionStore();
-  const sessions = await store.list();
-  return c.json({ sessions });
-});
-
 // ── Bulk setup ──
-// Single call to configure knowledge + secrets. Ideal for frontend onboarding.
+
 app.post("/api/setup", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
 
-  // Default agent name for knowledge items that don't specify one
   const defaultAgent = listAgents()[0] ?? "default";
+
   if (body.knowledge) {
     for (const item of body.knowledge) {
       if (!item.agent) item.agent = defaultAgent;
     }
   }
 
-  const results = bulkSetup(body);
-  const hasErrors = results.knowledge.some((r) => !r.ok) || results.secrets.some((r) => !r.ok);
-  return c.json(results, hasErrors ? 207 : 201);
+  const knowledgeResults = bulkSetup(body);
+
+  // Tools
+  const toolResults: Array<{ name: string; ok: boolean; error?: string }> = [];
+  if (body.tools && Array.isArray(body.tools)) {
+    for (const toolDef of body.tools) {
+      const result = registerTool(toolDef, defaultAgent);
+      if (result.ok) {
+        toolResults.push({ name: result.tool.name, ok: true });
+      } else {
+        toolResults.push({ name: toolDef.name ?? "unknown", ok: false, error: result.error });
+      }
+    }
+  }
+
+  // Builtins toggle
+  const builtinResults: Array<{ name: string; ok: boolean }> = [];
+  if (body.builtins && Array.isArray(body.builtins)) {
+    for (const name of body.builtins) {
+      builtinResults.push({ name, ok: enableBuiltin(name) });
+    }
+  }
+
+  const allResults = {
+    ...knowledgeResults,
+    tools: toolResults,
+    builtins: builtinResults,
+  };
+
+  const hasErrors =
+    knowledgeResults.knowledge.some((r) => !r.ok) ||
+    knowledgeResults.secrets.some((r) => !r.ok) ||
+    toolResults.some((r) => !r.ok);
+
+  return c.json(allResults, hasErrors ? 207 : 201);
 });
 
-// ── Knowledge API ──
+// ── Knowledge ──
 
 app.post("/api/knowledge", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
-
   const agent = body.agent ?? listAgents()[0] ?? "default";
   const result = addKnowledge({ ...body, agent });
   if (!result.ok) return c.json({ error: result.error }, 400);
@@ -289,7 +349,7 @@ app.delete("/api/knowledge/:id", (c) => {
   return c.json({ ok: true });
 });
 
-// ── Secrets API ──
+// ── Secrets ──
 
 app.post("/api/secrets", async (c) => {
   const body = await c.req.json().catch(() => null);
@@ -310,4 +370,57 @@ app.get("/api/secrets/:key", (c) => {
 app.delete("/api/secrets/:key", (c) => {
   deleteSecret(c.req.param("key"));
   return c.json({ ok: true });
+});
+
+// ── Tools ──
+
+app.post("/api/tools", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+  const agent = body.agent ?? listAgents()[0] ?? "default";
+  const result = registerTool(body, agent);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json(result.tool, 201);
+});
+
+app.get("/api/tools", (c) => {
+  const agent = c.req.query("agent");
+  return c.json({ tools: listTools(agent ?? undefined) });
+});
+
+app.get("/api/tools/:name", (c) => {
+  const tool = getTool(c.req.param("name"));
+  if (!tool) return c.json({ error: "Not found" }, 404);
+  return c.json(tool);
+});
+
+app.put("/api/tools/:name", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+  const updated = updateTool(c.req.param("name"), body);
+  if (!updated) return c.json({ error: "Not found" }, 404);
+  return c.json(updated);
+});
+
+app.delete("/api/tools/:name", (c) => {
+  deleteTool(c.req.param("name"));
+  return c.json({ ok: true });
+});
+
+// ── Builtins ──
+
+app.get("/api/builtins", (c) => {
+  return c.json({ builtins: listBuiltins() });
+});
+
+app.post("/api/builtins/:name/enable", (c) => {
+  const ok = enableBuiltin(c.req.param("name"));
+  if (!ok) return c.json({ error: "Unknown builtin" }, 404);
+  return c.json({ ok: true, name: c.req.param("name"), enabled: true });
+});
+
+app.post("/api/builtins/:name/disable", (c) => {
+  const ok = disableBuiltin(c.req.param("name"));
+  if (!ok) return c.json({ error: "Unknown builtin" }, 404);
+  return c.json({ ok: true, name: c.req.param("name"), enabled: false });
 });

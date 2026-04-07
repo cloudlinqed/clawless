@@ -1,13 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { KnowledgeItem, KnowledgePersistence, SecretEntry } from "./knowledge.js";
+import type { StoredToolConfig, ToolPersistence } from "./tool-store.js";
 
 /**
- * File-based persistence for knowledge and secrets.
+ * File-based persistence for knowledge, secrets, and tools.
  * Stores as JSON files in a configurable directory.
- * Simple, works locally and on serverless with mounted volumes.
  */
-export class FilePersistence implements KnowledgePersistence {
+export class FilePersistence implements KnowledgePersistence, ToolPersistence {
   private dir: string;
 
   constructor(dir?: string) {
@@ -18,31 +18,41 @@ export class FilePersistence implements KnowledgePersistence {
     await fs.mkdir(this.dir, { recursive: true });
   }
 
-  async loadKnowledge(): Promise<KnowledgeItem[]> {
+  private async readJson<T>(file: string): Promise<T[]> {
     try {
-      const data = await fs.readFile(path.join(this.dir, "knowledge.json"), "utf-8");
+      const data = await fs.readFile(path.join(this.dir, file), "utf-8");
       return JSON.parse(data);
     } catch {
       return [];
     }
+  }
+
+  private async writeJson(file: string, data: unknown): Promise<void> {
+    await this.ensureDir();
+    await fs.writeFile(path.join(this.dir, file), JSON.stringify(data, null, 2));
+  }
+
+  async loadKnowledge(): Promise<KnowledgeItem[]> {
+    return this.readJson("knowledge.json");
   }
 
   async saveKnowledge(items: KnowledgeItem[]): Promise<void> {
-    await this.ensureDir();
-    await fs.writeFile(path.join(this.dir, "knowledge.json"), JSON.stringify(items, null, 2));
+    return this.writeJson("knowledge.json", items);
   }
 
   async loadSecrets(): Promise<SecretEntry[]> {
-    try {
-      const data = await fs.readFile(path.join(this.dir, "secrets.json"), "utf-8");
-      return JSON.parse(data);
-    } catch {
-      return [];
-    }
+    return this.readJson("secrets.json");
   }
 
   async saveSecrets(entries: SecretEntry[]): Promise<void> {
-    await this.ensureDir();
-    await fs.writeFile(path.join(this.dir, "secrets.json"), JSON.stringify(entries, null, 2));
+    return this.writeJson("secrets.json", entries);
+  }
+
+  async loadTools(): Promise<StoredToolConfig[]> {
+    return this.readJson("tools.json");
+  }
+
+  async saveTools(tools: StoredToolConfig[]): Promise<void> {
+    return this.writeJson("tools.json", tools);
   }
 }

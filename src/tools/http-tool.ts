@@ -1,14 +1,14 @@
 import { defineTool, Type } from "./interface.js";
 import type { TSchema } from "@mariozechner/pi-ai";
 
-interface HttpParam {
+export interface HttpParam {
   type: "string" | "number" | "boolean";
   description: string;
   required?: boolean;
   default?: string | number | boolean;
 }
 
-interface HttpToolConfig {
+export interface HttpToolConfig {
   /** Tool name the agent will call */
   name: string;
   /** Human label */

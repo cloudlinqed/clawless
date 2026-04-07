@@ -2,6 +2,7 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 
 export interface SessionData {
   id: string;
+  userId: string;
   toolSet: string;
   messages: AgentMessage[];
   createdAt: number;
@@ -11,13 +12,12 @@ export interface SessionData {
 /**
  * Pluggable session store interface.
  *
- * Implementations can be backed by in-memory maps, Vercel KV,
- * Upstash Redis, DynamoDB, or any other storage backend.
- * The backend is chosen at deploy time via SESSION_STORE env var.
+ * All operations are scoped by userId — the agent never sees
+ * another user's sessions or conversation history.
  */
 export interface SessionStore {
-  load(id: string): Promise<SessionData | null>;
+  load(id: string, userId: string): Promise<SessionData | null>;
   save(session: SessionData): Promise<void>;
-  delete(id: string): Promise<void>;
-  list(): Promise<Array<{ id: string; toolSet: string; updatedAt: number }>>;
+  delete(id: string, userId: string): Promise<void>;
+  list(userId: string): Promise<Array<{ id: string; toolSet: string; updatedAt: number }>>;
 }

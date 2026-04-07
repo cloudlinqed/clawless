@@ -8,12 +8,12 @@ export { runAgentStream } from "./runtime/stream.js";
 export type { SSEEvent } from "./runtime/stream.js";
 export type { ClawlessRequest, ClawlessResponse, AgentRunConfig } from "./runtime/types.js";
 
-// Agent config — the main API for defining what your agent does
+// Agent config
 export { defineAgent, registerAgent, getAgent, getDefaultAgent, listAgents } from "./config/agent-def.js";
 export type { AgentDef } from "./config/agent-def.js";
 export { loadConfig } from "./config/loader.js";
 
-// Knowledge & secrets — teach the agent about APIs, tools, workflows
+// Knowledge & secrets
 export {
   addKnowledge, updateKnowledge, deleteKnowledge, getKnowledge,
   listKnowledge, buildSystemPrompt,
@@ -21,9 +21,20 @@ export {
 } from "./config/knowledge.js";
 export type { KnowledgeItem } from "./config/knowledge.js";
 
-// Tools
+// Dynamic tools
 export { defineTool, Type } from "./tools/interface.js";
 export { httpTool } from "./tools/http-tool.js";
+export type { HttpToolConfig } from "./tools/http-tool.js";
+export {
+  registerTool, updateTool, deleteTool, getTool,
+  listTools, buildDynamicTools,
+} from "./config/tool-store.js";
+export type { StoredToolConfig } from "./config/tool-store.js";
+
+// Built-in tools
+export {
+  getEnabledBuiltins, listBuiltins, enableBuiltin, disableBuiltin,
+} from "./tools/builtins/index.js";
 
 // Session
 export { getSessionStore, setSessionStore, MemorySessionStore } from "./session/index.js";

@@ -5,3 +5,5 @@ dist/
 .env
 .vercel/
 *.tsbuildinfo
+src/tools/amazon-search.ts
+src/tools/format-results.ts
