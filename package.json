@@ -1,0 +1,29 @@
+{
+  "name": "clawless",
+  "version": "0.1.0",
+  "description": "OpenClaw agent runtime extracted for serverless — triggered per-request, zero idle cost",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "node --env-file=.env --import tsx src/adapters/standalone.ts",
+    "build": "tsc",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "deploy": "vercel deploy"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.13",
+    "@mariozechner/pi-agent-core": "0.65.2",
+    "@mariozechner/pi-ai": "0.65.2",
+    "hono": "^4.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  }
+}
