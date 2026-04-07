@@ -1,6 +1,6 @@
 # Clawless
 
-OpenClaw's agent runtime extracted for serverless. Same Pi SDK agent brain, no Gateway daemon. Triggered per-request via HTTP, zero idle cost.
+OpenClaw's agent runtime extracted for serverless. Same Pi SDK agent brain, no Gateway daemon. Triggered per-request via HTTP, zero idle cost. Multi-user, multi-agent.
 
 ## Setup
 
@@ -48,11 +48,47 @@ export const myAgent = defineAgent({
 
 The `instructions` field is natural language — tell the agent what it does, how it should behave, what to prioritize. The agent figures out when and how to call the tools.
 
-You can define multiple agents in the same config. Each is reachable by name.
+## Built-in tools
+
+Clawless ships with 14 built-in tools. Core tools are enabled by default. Tools that need external API keys are disabled until you enable them.
+
+### Core (enabled by default)
+
+| Tool | Description |
+|------|-------------|
+| `fetch_page` | Fetch a URL and return readable text (HTML stripped) |
+| `json_request` | Generic HTTP call — agent controls URL, method, headers, body |
+| `current_datetime` | Current date, time, and timezone |
+| `store_memo` | Save notes that persist across turns (per-user) |
+| `recall_memo` | Retrieve previously saved memos (per-user) |
+| `update_plan` | Show step-by-step progress to the user (A2UI) |
+| `sessions_list` | List the user's previous conversations |
+| `sessions_history` | Retrieve conversation history from a past session |
+| `sessions_spawn` | Spawn a sub-agent for focused parallel tasks |
+| `subagents` | List and manage spawned sub-agents |
+
+### Needs API key (disabled by default)
+
+| Tool | Description | Required env vars |
+|------|-------------|-------------------|
+| `web_search` | Search the web (Brave, SerpAPI, or Google) | `BRAVE_SEARCH_API_KEY` or `SERP_API_KEY` or `GOOGLE_SEARCH_API_KEY` + `GOOGLE_SEARCH_CX` |
+| `image_analyze` | Analyze images with a vision model | `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` |
+| `image_generate` | Generate images from text (DALL-E) | `OPENAI_API_KEY` |
+| `text_to_speech` | Convert text to speech audio | `OPENAI_API_KEY` |
+
+Enable them via the API after providing the required secrets:
+
+```bash
+# Provide the key
+curl -X POST /api/secrets -d '{"key":"BRAVE_SEARCH_API_KEY","value":"..."}'
+
+# Enable the tool
+curl -X POST /api/builtins/web_search/enable
+```
 
 ## API
 
-All endpoints are under `/api`. Default port is `3000` (set `PORT` env var to change).
+All endpoints are under `/api`. Default port is `3000`.
 
 ### POST /api/agent
 
@@ -63,6 +99,7 @@ Run the agent with a prompt. Returns the full result when complete.
 ```json
 {
   "prompt": "Find me a round trip from NYC to Tokyo in July",
+  "userId": "user-123",
   "agent": "my-agent",
   "sessionKey": "optional-for-followups",
   "model": "gpt-4o",
@@ -74,7 +111,8 @@ Run the agent with a prompt. Returns the full result when complete.
 | Field | Required | Description |
 |-------|----------|-------------|
 | `prompt` | Yes | User message |
-| `agent` | No | Agent name from config. Omit to use the first defined agent |
+| `userId` | Yes | Unique user identifier — sessions are isolated per user |
+| `agent` | No | Agent name from config. Omit to use the default |
 | `sessionKey` | No | Pass a previous `sessionKey` to continue a conversation |
 | `model` | No | Override model (default from `DEFAULT_MODEL` env) |
 | `provider` | No | Override provider (default from `DEFAULT_PROVIDER` env) |
@@ -106,7 +144,7 @@ Run the agent with a prompt. Returns the full result when complete.
 
 ### POST /api/agent/stream
 
-Same request as `/api/agent`, but returns Server-Sent Events (SSE).
+Same request as `/api/agent`, returns Server-Sent Events (SSE) for real-time streaming.
 
 **SSE events:**
 
@@ -114,81 +152,72 @@ Same request as `/api/agent`, but returns Server-Sent Events (SSE).
 |-------|------|------|
 | `agent_start` | `{}` | Agent begins processing |
 | `turn_start` | `{ turn }` | New LLM turn begins |
-| `text_delta` | `{ delta }` | Incremental text token from the LLM |
-| `text_done` | `{ text }` | Full text of completed assistant message |
-| `tool_start` | `{ toolCallId, toolName, args }` | Agent is calling a tool |
+| `text_delta` | `{ delta }` | Incremental text token |
+| `text_done` | `{ text }` | Full completed assistant message |
+| `tool_start` | `{ toolCallId, toolName, args }` | Tool execution begins |
 | `tool_end` | `{ toolCallId, toolName, result, isError }` | Tool execution finished |
 | `turn_end` | `{ turn }` | LLM turn complete |
 | `agent_end` | `{ sessionKey, result, toolCalls, usage }` | Agent finished |
 | `error` | `{ message }` | Something went wrong |
 
-**Frontend example:**
-
-```ts
-import { EventSourceParserStream } from "eventsource-parser/stream";
-
-const res = await fetch("http://localhost:3000/api/agent/stream", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ prompt: "Hello" }),
-});
-
-const stream = res.body!
-  .pipeThrough(new TextDecoderStream())
-  .pipeThrough(new EventSourceParserStream());
-
-for await (const { event, data } of stream) {
-  switch (event) {
-    case "text_delta":
-      process.stdout.write(JSON.parse(data).delta);
-      break;
-    case "tool_start":
-      console.log("Calling:", JSON.parse(data).toolName);
-      break;
-    case "agent_end":
-      console.log("Done:", JSON.parse(data));
-      break;
-  }
-}
-```
-
 ### A2UI (Agent-to-UI)
 
-The SSE events provide all the data needed for A2UI rendering on the frontend. The `tool_start` / `tool_end` events give you the full tool execution lifecycle. `text_delta` gives you token-by-token streaming. The frontend decides how to render this.
+The SSE events provide all the data needed for A2UI rendering. The `update_plan` tool emits step-by-step progress via `tool_end`. `text_delta` streams text token by token. `tool_start` / `tool_end` give full tool lifecycle. The frontend decides how to render.
 
 ### POST /api/setup
 
-Bulk configure knowledge and secrets in a single call. Ideal for frontend onboarding flows.
+Bulk configure tools, knowledge, secrets, and builtins in a single call.
 
 ```json
 {
   "secrets": [
-    { "key": "MY_API_KEY", "value": "abc123" },
-    { "key": "OTHER_KEY", "value": "xyz", "expiresAt": 1735689600000 }
+    { "key": "MY_API_KEY", "value": "abc123" }
+  ],
+  "tools": [
+    {
+      "name": "search_items",
+      "description": "Search for items",
+      "url": "https://api.example.com/search",
+      "parameters": {
+        "query": { "type": "string", "description": "Search query", "required": true }
+      },
+      "auth": { "queryParams": { "api_key": "MY_API_KEY" } }
+    }
   ],
   "knowledge": [
     {
-      "title": "My API Documentation",
-      "content": "## Endpoint\n\nhttps://api.example.com/search\n\n## Parameters\n...",
+      "title": "API Documentation",
+      "content": "## How to use the search API\n...",
       "priority": 10
     }
-  ]
+  ],
+  "builtins": ["web_search", "image_analyze"]
 }
 ```
 
-### Knowledge API
+### Tools API
 
-Teach the agent about APIs, tools, and workflows at runtime.
+Register HTTP API tools the agent can call at runtime.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/knowledge` | Add a knowledge item |
-| `GET` | `/api/knowledge` | List all (optional `?agent=name` filter) |
+| `POST` | `/api/tools` | Register a tool |
+| `GET` | `/api/tools` | List all (optional `?agent=name`) |
+| `GET` | `/api/tools/:name` | Get one |
+| `PUT` | `/api/tools/:name` | Update |
+| `DELETE` | `/api/tools/:name` | Delete |
+
+### Knowledge API
+
+Teach the agent about APIs, tools, and workflows.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/knowledge` | Add knowledge |
+| `GET` | `/api/knowledge` | List all (optional `?agent=name`) |
 | `GET` | `/api/knowledge/:id` | Get one |
 | `PUT` | `/api/knowledge/:id` | Update |
 | `DELETE` | `/api/knowledge/:id` | Delete |
-
-Knowledge items have a `priority` field (0-1000, default 100). Lower = appears first in the prompt.
 
 ### Secrets API
 
@@ -198,27 +227,44 @@ Provide API keys and credentials at runtime.
 |--------|----------|-------------|
 | `POST` | `/api/secrets` | Set a secret (`{ key, value, expiresAt? }`) |
 | `GET` | `/api/secrets` | List keys (values never exposed) |
-| `GET` | `/api/secrets/:key` | Check if a secret exists |
+| `GET` | `/api/secrets/:key` | Check if exists |
 | `DELETE` | `/api/secrets/:key` | Delete |
 
-### Other endpoints
+### Builtins API
+
+Enable or disable built-in tools.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/health` | Health check, lists agents |
-| `GET` | `/api/sessions` | List active sessions |
-| `GET` | `/api/sessions/:id` | Session metadata |
-| `DELETE` | `/api/sessions/:id` | Delete session |
+| `GET` | `/api/builtins` | List all with enabled status |
+| `POST` | `/api/builtins/:name/enable` | Enable a builtin |
+| `POST` | `/api/builtins/:name/disable` | Disable a builtin |
+
+### Sessions API
+
+All session endpoints require `?userId=` query parameter.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/sessions?userId=X` | List user's sessions |
+| `GET` | `/api/sessions/:id?userId=X` | Session metadata |
+| `DELETE` | `/api/sessions/:id?userId=X` | Delete session |
+
+### Other
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/health` | Health check, lists agents and config |
 
 ## Multi-turn conversations
 
-Pass the `sessionKey` from a previous response to continue:
+Pass `sessionKey` from a previous response to continue. Sessions are isolated per `userId`.
 
 ```ts
 const res1 = await fetch("/api/agent", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ prompt: "Hello" }),
+  body: JSON.stringify({ prompt: "Hello", userId: "user-123" }),
 });
 const data1 = await res1.json();
 
@@ -227,50 +273,60 @@ const res2 = await fetch("/api/agent", {
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
     prompt: "Tell me more",
+    userId: "user-123",
     sessionKey: data1.sessionKey,
   }),
 });
 ```
 
-## Creating tools
+## Sub-agents
 
-### HTTP tools (declarative)
+The agent can spawn sub-agents for complex parallel tasks:
 
-For APIs you just need to call:
+```
+User: "Compare budget vs premium camping gear"
 
-```ts
-httpTool({
-  name: "tool_name",
-  description: "What this API does (the agent reads this)",
-  url: "https://api.example.com/endpoint",
-  method: "GET",
-  parameters: {
-    query: { type: "string", description: "...", required: true },
-    limit: { type: "number", description: "...", default: 10 },
-  },
-  auth: {
-    queryParams: { api_key: "MY_ENV_VAR" },
-    headers: { "Authorization": "MY_TOKEN_VAR" },
-  },
-});
+Agent uses update_plan → shows 3 steps
+Agent uses sessions_spawn → "Research budget camping gear under $200"
+Agent uses sessions_spawn → "Research premium camping gear over $500"
+Agent merges results and presents comparison
 ```
 
-### Code tools (custom logic)
+Sub-agents run within the same request. They get the same tools and knowledge but a focused task. No persistent processes needed.
+
+## Creating tools
+
+### Via API (runtime, from frontend)
+
+```bash
+curl -X POST /api/tools -H "Content-Type: application/json" -d '{
+  "name": "my_api",
+  "description": "What this API does",
+  "url": "https://api.example.com/endpoint",
+  "method": "GET",
+  "parameters": {
+    "query": { "type": "string", "description": "...", "required": true }
+  },
+  "auth": {
+    "queryParams": { "api_key": "MY_API_KEY" }
+  }
+}'
+```
+
+### In config (static, in code)
 
 ```ts
-import { defineTool, Type } from "./src/tools/interface.js";
+// clawless.config.ts
+httpTool({ name: "my_tool", ... })
 
-export const myTool = defineTool({
+// or with custom logic
+defineTool({
   name: "calculate",
   label: "Calculator",
   description: "Perform a calculation",
-  parameters: Type.Object({
-    expression: Type.String({ description: "Math expression" }),
-  }),
-  execute: async (params) => {
-    return JSON.stringify({ result: eval(params.expression) });
-  },
-});
+  parameters: Type.Object({ expression: Type.String() }),
+  execute: async (params) => JSON.stringify({ result: eval(params.expression) }),
+})
 ```
 
 ## Supported models
@@ -285,8 +341,6 @@ Any model supported by the Pi SDK:
 | `anthropic` | `claude-opus-4-6` | Most capable |
 | `google` | `gemini-2.5-pro` | Google alternative |
 
-Set `DEFAULT_PROVIDER` and `DEFAULT_MODEL` in `.env`. Set the matching API key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`).
-
 ## Environment variables
 
 | Variable | Required | Default | Description |
@@ -295,40 +349,26 @@ Set `DEFAULT_PROVIDER` and `DEFAULT_MODEL` in `.env`. Set the matching API key (
 | `DEFAULT_MODEL` | Yes | — | Model ID (e.g. `gpt-4o`) |
 | `OPENAI_API_KEY` | Yes* | — | API key for OpenAI |
 | `PORT` | No | `3000` | Server port |
-| `CORS_ORIGIN` | No | `localhost:*` | Allowed origins (comma-separated) |
-| `MAX_TURNS` | No | `10` | Default max agent loop iterations |
+| `CORS_ORIGIN` | No | `localhost:*` | Allowed origins |
+| `MAX_TURNS` | No | `10` | Max agent loop iterations |
 | `TIMEOUT_MS` | No | `120000` | Request timeout in ms |
 | `MAX_KNOWLEDGE_CHARS` | No | `100000` | Max total knowledge size |
-| `DATA_DIR` | No | `.clawless` | Directory for persisted data |
+| `DATA_DIR` | No | `.clawless` | Persisted data directory |
+| `VISION_PROVIDER` | No | `openai` | Provider for image_analyze |
+| `VISION_MODEL` | No | `gpt-4o` | Model for image_analyze |
+| `IMAGE_MODEL` | No | `dall-e-3` | Model for image_generate |
+| `TTS_MODEL` | No | `tts-1` | Model for text_to_speech |
 
 *Required for the default OpenAI provider. Use the matching env var for other providers.
-
-## Connecting from a frontend
-
-```ts
-const CLAWLESS_URL = "http://localhost:3000";
-
-async function ask(prompt: string, sessionKey?: string) {
-  const res = await fetch(`${CLAWLESS_URL}/api/agent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, sessionKey }),
-  });
-  return res.json();
-}
-```
-
-CORS allows all `localhost` origins in dev. Set `CORS_ORIGIN` for production.
 
 ## Deploy
 
 **Railway:**
 
 1. Connect your GitHub repo in Railway
-2. Railway auto-detects Node.js — it runs `npm run build` then `npm start`
-3. Set environment variables in the Railway dashboard (`DEFAULT_MODEL`, `DEFAULT_PROVIDER`, `OPENAI_API_KEY`, etc.)
-4. Set `PORT` to the value Railway assigns (Railway sets this automatically)
-5. Set `CORS_ORIGIN` to your frontend URL
+2. Railway runs `npm run build` then `npm start` automatically
+3. Set environment variables in the Railway dashboard
+4. Set `CORS_ORIGIN` to your frontend URL
 
 **Vercel:**
 ```bash
@@ -337,9 +377,5 @@ vercel deploy
 
 **Any Node.js host:**
 ```bash
-npm install
-npm run build
-npm start
+npm install && npm run build && npm start
 ```
-
-Set environment variables in your platform's dashboard.
