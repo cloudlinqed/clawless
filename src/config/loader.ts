@@ -8,8 +8,9 @@ import { registerAgent } from "./agent-def.js";
  * Load agent definitions from clawless.config.
  *
  * Looks for (in order):
- * 1. clawless.config.js  (compiled — production)
- * 2. clawless.config.ts  (source — dev with tsx)
+ * 1. dist/clawless.config.js  (compiled — production on Railway/Vercel)
+ * 2. clawless.config.js       (compiled — if rootDir is ".")
+ * 3. clawless.config.ts       (source — dev with tsx)
  */
 export async function loadConfig(configPath?: string): Promise<void> {
   const cwd = process.cwd();
@@ -17,8 +18,8 @@ export async function loadConfig(configPath?: string): Promise<void> {
 
   if (!resolved) {
     throw new Error(
-      `No clawless.config.js or clawless.config.ts found in ${cwd}. ` +
-      `Create one with defineAgent() exports.`
+      `No clawless config found in ${cwd}. ` +
+      `Create clawless.config.ts with defineAgent() exports.`
     );
   }
 
@@ -48,9 +49,12 @@ export async function loadConfig(configPath?: string): Promise<void> {
 }
 
 function findConfig(cwd: string): string | null {
-  const candidates = ["clawless.config.js", "clawless.config.ts"];
-  for (const name of candidates) {
-    const full = path.resolve(cwd, name);
+  const candidates = [
+    path.resolve(cwd, "dist", "clawless.config.js"),
+    path.resolve(cwd, "clawless.config.js"),
+    path.resolve(cwd, "clawless.config.ts"),
+  ];
+  for (const full of candidates) {
     if (fs.existsSync(full)) return full;
   }
   return null;
