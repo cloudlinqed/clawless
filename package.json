@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "node --env-file=.env --import tsx src/adapters/standalone.ts",
     "build": "tsc",
+    "start": "node dist/src/adapters/standalone.js",
     "test": "vitest",
     "test:run": "vitest run",
     "deploy": "vercel deploy"

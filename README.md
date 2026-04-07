@@ -322,14 +322,24 @@ CORS allows all `localhost` origins in dev. Set `CORS_ORIGIN` for production.
 
 ## Deploy
 
+**Railway:**
+
+1. Connect your GitHub repo in Railway
+2. Railway auto-detects Node.js — it runs `npm run build` then `npm start`
+3. Set environment variables in the Railway dashboard (`DEFAULT_MODEL`, `DEFAULT_PROVIDER`, `OPENAI_API_KEY`, etc.)
+4. Set `PORT` to the value Railway assigns (Railway sets this automatically)
+5. Set `CORS_ORIGIN` to your frontend URL
+
 **Vercel:**
 ```bash
 vercel deploy
 ```
 
-**Railway / Docker:**
+**Any Node.js host:**
 ```bash
-npm run build && node dist/adapters/standalone.js
+npm install
+npm run build
+npm start
 ```
 
 Set environment variables in your platform's dashboard.
