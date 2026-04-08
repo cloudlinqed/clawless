@@ -371,56 +371,89 @@ app.post("/api/agent/stream", async (c) => {
 
   return streamSSE(c, async (stream) => {
     try {
-      let lastError: unknown;
+      for (let i = 0; i < modelChain.length; i++) {
+        const { model, label } = modelChain[i];
+        const isLast = i === modelChain.length - 1;
 
-      for (const { model, label } of modelChain) {
-        try {
-          await stream.writeSSE({
-            event: "model_selected",
-            data: JSON.stringify({ model: label }),
-          });
+        await stream.writeSSE({
+          event: "model_selected",
+          data: JSON.stringify({ model: label }),
+        });
 
-          const events = runAgentStream(parsed.data.prompt, {
-            model,
-            systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
-            tools: allTools,
-            messages: session?.messages,
-            maxTurns,
-            signal: controller.signal,
-            sessionId: currentKey,
-          });
+        const events = runAgentStream(parsed.data.prompt, {
+          model,
+          systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
+          tools: allTools,
+          messages: session?.messages,
+          maxTurns,
+          signal: controller.signal,
+          sessionId: currentKey,
+        });
 
-          let returnValue: Awaited<ReturnType<typeof events.next>> | undefined;
-          while (true) {
-            returnValue = await events.next();
-            if (returnValue.done) break;
-            const sseEvent = returnValue.value;
+        // Consume the stream, detect errors, decide whether to fallback
+        let hadError = false;
+        let errorMessage = "";
+        const bufferedEvents: Array<{ event: string; data: string }> = [];
+
+        let returnValue: Awaited<ReturnType<typeof events.next>> | undefined;
+        while (true) {
+          returnValue = await events.next();
+          if (returnValue.done) break;
+          const sseEvent = returnValue.value;
+
+          // Check for error events — if we have fallbacks left, don't write yet
+          if (sseEvent.event === "error" && !isLast) {
+            hadError = true;
+            errorMessage = "data" in sseEvent ? (sseEvent.data as any).message ?? "" : "";
+            // Drain remaining events (agent_end) without writing
+            while (true) {
+              const r = await events.next();
+              if (r.done) { returnValue = r; break; }
+            }
+            break;
+          }
+
+          // Buffer early events (agent_start, turn_start) on non-last models
+          // so we can discard them if this model fails
+          if (!isLast && sseEvent.event !== "text_delta" && sseEvent.event !== "tool_start" && sseEvent.event !== "tool_end" && bufferedEvents.length < 5 && !hadError) {
+            bufferedEvents.push({
+              event: sseEvent.event,
+              data: "data" in sseEvent ? JSON.stringify(sseEvent.data) : "{}",
+            });
+          } else {
+            // Flush buffer first
+            for (const be of bufferedEvents) {
+              await stream.writeSSE(be);
+            }
+            bufferedEvents.length = 0;
+
             await stream.writeSSE({
               event: sseEvent.event,
               data: "data" in sseEvent ? JSON.stringify(sseEvent.data) : "{}",
             });
           }
+        }
 
-          const messages = returnValue?.value;
-          if (messages && messages.length > 0) {
-            await saveSession(currentKey, userId, agentDef.name, messages, session);
-          }
-          return; // Success — done
-        } catch (err) {
-          lastError = err;
-          if (!shouldFallback(err, controller.signal)) break;
+        if (hadError && !isLast && shouldFallback(new Error(errorMessage), controller.signal)) {
           await stream.writeSSE({
             event: "model_fallback",
-            data: JSON.stringify({ failed: label, reason: err instanceof Error ? err.message : String(err) }),
+            data: JSON.stringify({ failed: label, reason: errorMessage }),
           });
+          continue; // Try next model
         }
-      }
 
-      const message = lastError instanceof Error ? lastError.message : String(lastError);
-      await stream.writeSSE({
-        event: "error",
-        data: JSON.stringify({ message }),
-      });
+        // Success or last model — flush any remaining buffer
+        for (const be of bufferedEvents) {
+          await stream.writeSSE(be);
+        }
+
+        // Save session
+        const messages = returnValue?.value;
+        if (messages && messages.length > 0) {
+          await saveSession(currentKey, userId, agentDef.name, messages, session);
+        }
+        return;
+      }
     } finally {
       clearTimeout(timeout);
     }
