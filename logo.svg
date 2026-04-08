@@ -1,0 +1,55 @@
+<svg width="100%" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Clawless lobster logo with energy radiating from arms</title>
+<desc>A stylized lobster icon with no claws, arms ending in radiating energy bursts</desc>
+<style>
+:root { --claw-main: #E8581C; --claw-dark: #C43E0A; --claw-light: #F4845F; --claw-highlight: #FFB088; --claw-glow: #FFD4A8; --claw-bg: #1A1A2E; --claw-ring: #2A2A4A; }
+@media (prefers-color-scheme: light) { :root { --claw-bg: #F5F0EB; --claw-ring: #E8E0D8; } }
+</style>
+<circle cx="340" cy="340" r="280" fill="var(--claw-bg)"/>
+<circle cx="340" cy="340" r="260" fill="var(--claw-ring)" opacity="0.5"/>
+<g transform="translate(340, 370)">
+<g opacity="0.25">
+<line x1="-120" y1="-105" x2="-170" y2="-155" stroke="var(--claw-glow)" stroke-width="3" stroke-linecap="round"/>
+<line x1="-125" y1="-85" x2="-180" y2="-100" stroke="var(--claw-glow)" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="-115" y1="-125" x2="-155" y2="-175" stroke="var(--claw-glow)" stroke-width="2" stroke-linecap="round"/>
+</g>
+<g opacity="0.25">
+<line x1="120" y1="-105" x2="170" y2="-155" stroke="var(--claw-glow)" stroke-width="3" stroke-linecap="round"/>
+<line x1="125" y1="-85" x2="180" y2="-100" stroke="var(--claw-glow)" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="115" y1="-125" x2="155" y2="-175" stroke="var(--claw-glow)" stroke-width="2" stroke-linecap="round"/>
+</g>
+<g opacity="0.4"><circle cx="-118" cy="-100" r="22" fill="var(--claw-highlight)"/></g>
+<g opacity="0.2"><circle cx="-118" cy="-100" r="34" fill="var(--claw-glow)"/></g>
+<circle cx="-118" cy="-100" r="12" fill="var(--claw-highlight)"/>
+<g opacity="0.4"><circle cx="118" cy="-100" r="22" fill="var(--claw-highlight)"/></g>
+<g opacity="0.2"><circle cx="118" cy="-100" r="34" fill="var(--claw-glow)"/></g>
+<circle cx="118" cy="-100" r="12" fill="var(--claw-highlight)"/>
+<path d="M-60 15 Q-95 -25 -118 -100" stroke="var(--claw-main)" stroke-width="20" fill="none" stroke-linecap="round"/>
+<path d="M-60 15 Q-95 -25 -118 -100" stroke="var(--claw-light)" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.4"/>
+<path d="M60 15 Q95 -25 118 -100" stroke="var(--claw-main)" stroke-width="20" fill="none" stroke-linecap="round"/>
+<path d="M60 15 Q95 -25 118 -100" stroke="var(--claw-light)" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.4"/>
+<ellipse cx="0" cy="40" rx="65" ry="90" fill="var(--claw-main)"/>
+<ellipse cx="0" cy="30" rx="55" ry="75" fill="var(--claw-dark)" opacity="0.3"/>
+<ellipse cx="0" cy="80" rx="50" ry="12" fill="var(--claw-dark)" opacity="0.25"/>
+<ellipse cx="0" cy="55" rx="55" ry="12" fill="var(--claw-dark)" opacity="0.2"/>
+<ellipse cx="0" cy="30" rx="58" ry="12" fill="var(--claw-dark)" opacity="0.15"/>
+<path d="M-30 130 Q0 170 30 130" fill="var(--claw-dark)"/>
+<path d="M-45 128 Q-30 155 -15 130" fill="var(--claw-main)" opacity="0.8"/>
+<path d="M15 130 Q30 155 45 128" fill="var(--claw-main)" opacity="0.8"/>
+<path d="M-15 132 Q0 160 15 132" fill="var(--claw-light)" opacity="0.6"/>
+<line x1="-20" y1="-50" x2="-30" y2="-80" stroke="var(--claw-main)" stroke-width="5" stroke-linecap="round"/>
+<line x1="20" y1="-50" x2="30" y2="-80" stroke="var(--claw-main)" stroke-width="5" stroke-linecap="round"/>
+<circle cx="-32" cy="-84" r="8" fill="var(--claw-highlight)"/>
+<circle cx="32" cy="-84" r="8" fill="var(--claw-highlight)"/>
+<circle cx="-33" cy="-85" r="4" fill="var(--claw-bg)"/>
+<circle cx="33" cy="-85" r="4" fill="var(--claw-bg)"/>
+<line x1="-55" y1="60" x2="-95" y2="85" stroke="var(--claw-main)" stroke-width="4" stroke-linecap="round"/>
+<line x1="-50" y1="80" x2="-88" y2="110" stroke="var(--claw-main)" stroke-width="4" stroke-linecap="round"/>
+<line x1="-42" y1="98" x2="-78" y2="130" stroke="var(--claw-main)" stroke-width="4" stroke-linecap="round"/>
+<line x1="55" y1="60" x2="95" y2="85" stroke="var(--claw-main)" stroke-width="4" stroke-linecap="round"/>
+<line x1="50" y1="80" x2="88" y2="110" stroke="var(--claw-main)" stroke-width="4" stroke-linecap="round"/>
+<line x1="42" y1="98" x2="78" y2="130" stroke="var(--claw-main)" stroke-width="4" stroke-linecap="round"/>
+<path d="M-18 -52 Q-50 -120 -80 -140" stroke="var(--claw-light)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<path d="M18 -52 Q50 -120 80 -140" stroke="var(--claw-light)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+</g>
+</svg>
