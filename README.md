@@ -2,7 +2,7 @@
 
 OpenClaw's agent runtime extracted for serverless. Same Pi SDK agent brain, no Gateway daemon. Triggered per-request via HTTP, zero idle cost. Multi-user, multi-agent.
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/clawless?referralCode=clawless)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/clawless)
 
 ## Setup
 
