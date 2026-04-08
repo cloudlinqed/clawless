@@ -230,6 +230,23 @@ Provide API keys and credentials at runtime.
 | `GET` | `/api/secrets/:key` | Check if exists |
 | `DELETE` | `/api/secrets/:key` | Delete |
 
+### Secret resolution
+
+When the agent uses `json_request` or `fetch_page`, it may reference secret key names in URLs, headers, or body values (e.g. `api_key=SCRAPINGDOG_API_KEY`). Clawless automatically resolves these to real values **server-side** before making the HTTP call.
+
+- The agent writes the key name (from its knowledge), not the actual secret
+- The tool replaces `UPPER_SNAKE_CASE` values that match registered secrets or env vars
+- The real key **never** reaches the frontend — SSE events show the key name, not the value
+- Works in URL query params, headers (including `Bearer TOKEN_NAME`), and request body
+
+```
+Frontend sees (tool_start):  args.url = "...api_key=SCRAPINGDOG_API_KEY"
+Server resolves internally:  ...api_key=69230d...  (never sent to client)
+Frontend sees (tool_end):    result = "[product data]"
+```
+
+No extra configuration needed — if the secret is registered via `/api/secrets`, resolution is automatic.
+
 ### Builtins API
 
 Enable or disable built-in tools.

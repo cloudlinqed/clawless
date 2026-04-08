@@ -1,4 +1,5 @@
 import { defineTool, Type } from "../interface.js";
+import { resolveSecretsInUrl } from "./resolve-secrets.js";
 
 export const fetchPageTool = defineTool({
   name: "fetch_page",
@@ -16,7 +17,11 @@ export const fetchPageTool = defineTool({
   execute: async (params, signal) => {
     const maxChars = params.maxChars ?? 50_000;
 
-    const response = await fetch(params.url, {
+    // Resolve any secret key names in URL query params
+    const url = new URL(params.url);
+    resolveSecretsInUrl(url);
+
+    const response = await fetch(url.toString(), {
       signal,
       headers: {
         "User-Agent": "Clawless/1.0 (serverless agent)",

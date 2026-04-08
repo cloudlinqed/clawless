@@ -1,4 +1,9 @@
 import { defineTool, Type } from "../interface.js";
+import {
+  resolveSecretsInUrl,
+  resolveSecretsInHeaders,
+  resolveSecretsInBody,
+} from "./resolve-secrets.js";
 
 export const jsonRequestTool = defineTool({
   name: "json_request",
@@ -7,7 +12,8 @@ export const jsonRequestTool = defineTool({
     "Make an HTTP request to any URL and return the JSON response. " +
     "Use this to call REST APIs when you know the endpoint, method, headers, " +
     "and body from your knowledge. Supports GET, POST, PUT, PATCH, DELETE. " +
-    "Authentication headers and API keys should be provided in the headers parameter.",
+    "For authentication, use the secret key name as the value (e.g. MY_API_KEY) " +
+    "and it will be resolved to the actual credential automatically.",
   parameters: Type.Object({
     url: Type.String({ description: "Full URL to call" }),
     method: Type.Optional(
@@ -15,15 +21,15 @@ export const jsonRequestTool = defineTool({
     ),
     headers: Type.Optional(
       Type.Record(Type.String(), Type.String(), {
-        description: "HTTP headers as key-value pairs (e.g. Authorization, Content-Type)",
+        description: "HTTP headers as key-value pairs. Use secret key names for auth values.",
       })
     ),
     body: Type.Optional(
-      Type.Unknown({ description: "Request body — will be JSON-serialized" })
+      Type.Unknown({ description: "Request body — will be JSON-serialized. Secret key names in values are resolved." })
     ),
     queryParams: Type.Optional(
       Type.Record(Type.String(), Type.String(), {
-        description: "Query parameters as key-value pairs",
+        description: "Query parameters. Use secret key names as values for credentials.",
       })
     ),
   }),
@@ -31,17 +37,27 @@ export const jsonRequestTool = defineTool({
     const method = (params.method ?? "GET").toUpperCase();
     const url = new URL(params.url);
 
+    // Resolve secrets in URL query params (from the URL itself)
+    resolveSecretsInUrl(url);
+
+    // Resolve secrets in explicit query params
     if (params.queryParams) {
       for (const [key, value] of Object.entries(params.queryParams)) {
         url.searchParams.set(key, value);
       }
+      // Resolve again after adding params
+      resolveSecretsInUrl(url);
     }
 
-    const headers: Record<string, string> = { ...params.headers };
+    // Resolve secrets in headers
+    const headers: Record<string, string> = params.headers
+      ? resolveSecretsInHeaders(params.headers)
+      : {};
+
     let body: string | undefined;
 
     if (params.body !== undefined && method !== "GET" && method !== "HEAD") {
-      body = JSON.stringify(params.body);
+      body = JSON.stringify(resolveSecretsInBody(params.body));
       if (!headers["Content-Type"] && !headers["content-type"]) {
         headers["Content-Type"] = "application/json";
       }
