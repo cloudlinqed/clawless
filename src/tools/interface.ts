@@ -57,10 +57,8 @@ export function defineTool<TParams extends TSchema>(config: {
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: "text", text: `Error: ${message}` }],
-          details: { error: message },
-        };
+        // Throw so the Pi SDK agent loop marks this as isError: true
+        throw new Error(message);
       }
     },
   };

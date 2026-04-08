@@ -267,11 +267,37 @@ All session endpoints require `?userId=` query parameter.
 | `GET` | `/api/sessions/:id?userId=X` | Session metadata |
 | `DELETE` | `/api/sessions/:id?userId=X` | Delete session |
 
+### Capabilities
+
+Single view of everything the agent can do — all tool sources, knowledge, and secrets combined.
+
+```
+GET /api/capabilities?agent=assistant
+```
+
+```json
+{
+  "agent": "assistant",
+  "tools": [
+    { "name": "fetch_page", "source": "builtin", "enabled": true, "description": "..." },
+    { "name": "my_api", "source": "dynamic", "description": "...", "url": "https://..." },
+    { "name": "search_flights", "source": "config", "description": "..." }
+  ],
+  "knowledge": [
+    { "id": "abc", "title": "API Docs", "priority": 10, "contentLength": 1200 }
+  ],
+  "secrets": [
+    { "key": "MY_API_KEY", "expired": false }
+  ]
+}
+```
+
 ### Other
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/health` | Health check, lists agents and config |
+| `GET` | `/api/capabilities` | Full view of tools, knowledge, secrets (optional `?agent=name`) |
 
 ## Multi-turn conversations
 

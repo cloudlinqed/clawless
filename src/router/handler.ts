@@ -121,6 +121,51 @@ app.get("/api/health", (c) => {
   });
 });
 
+// ── Capabilities ──
+// Single view of everything the agent can do.
+
+app.get("/api/capabilities", (c) => {
+  const agentName = c.req.query("agent");
+  const agentDef = agentName ? getAgent(agentName) : getDefaultAgent();
+
+  const configTools = agentDef
+    ? agentDef.tools.map((t) => ({ name: t.name, source: "config", description: t.description }))
+    : [];
+
+  const dynamicTools = listTools(agentName ?? undefined).map((t) => ({
+    name: t.name,
+    source: "dynamic",
+    description: t.description,
+    url: t.url,
+  }));
+
+  const builtins = listBuiltins().map((b) => ({
+    name: b.name,
+    source: "builtin",
+    enabled: b.enabled,
+    description: b.description,
+  }));
+
+  const knowledge = listKnowledge(agentName ?? undefined).map((k) => ({
+    id: k.id,
+    title: k.title,
+    priority: k.priority,
+    contentLength: k.content.length,
+  }));
+
+  const secrets = listSecretKeys().map((s) => ({
+    key: s.key,
+    expired: s.expired,
+  }));
+
+  return c.json({
+    agent: agentDef?.name ?? null,
+    tools: [...configTools, ...dynamicTools, ...builtins],
+    knowledge,
+    secrets,
+  });
+});
+
 // ── Agent (non-streaming) ──
 
 app.post("/api/agent", async (c) => {
