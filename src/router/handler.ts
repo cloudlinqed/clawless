@@ -78,23 +78,16 @@ function resolveModelChain(
   return chain;
 }
 
-/** Check if an error is retryable (rate limit, auth, server error). */
-function isRetryableError(err: unknown): boolean {
+/**
+ * Check if an error should trigger model fallback.
+ * Only abort-related errors (user cancelled, timeout) skip fallback.
+ * Everything else — rate limits, auth, model not found, server errors — tries the next model.
+ */
+function shouldFallback(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return false;
   const msg = err instanceof Error ? err.message : String(err);
-  const lower = msg.toLowerCase();
-  return (
-    lower.includes("rate limit") ||
-    lower.includes("429") ||
-    lower.includes("503") ||
-    lower.includes("502") ||
-    lower.includes("overloaded") ||
-    lower.includes("capacity") ||
-    lower.includes("quota") ||
-    lower.includes("billing") ||
-    lower.includes("unauthorized") ||
-    lower.includes("401") ||
-    lower.includes("403")
-  );
+  if (msg.toLowerCase().includes("aborted")) return false;
+  return true;
 }
 
 // CORS
@@ -341,7 +334,7 @@ app.post("/api/agent", async (c) => {
       } catch (err) {
         lastError = err;
         usedModel = label;
-        if (!isRetryableError(err) || controller.signal.aborted) break;
+        if (!shouldFallback(err, controller.signal)) break;
         // Retryable — try next model in chain
       }
     }
@@ -415,7 +408,7 @@ app.post("/api/agent/stream", async (c) => {
           return; // Success — done
         } catch (err) {
           lastError = err;
-          if (!isRetryableError(err) || controller.signal.aborted) break;
+          if (!shouldFallback(err, controller.signal)) break;
           await stream.writeSSE({
             event: "model_fallback",
             data: JSON.stringify({ failed: label, reason: err instanceof Error ? err.message : String(err) }),
