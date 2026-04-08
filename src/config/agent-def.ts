@@ -23,6 +23,13 @@ export interface AgentDef {
   /** Default provider override (e.g. "anthropic") */
   provider?: string;
 
+  /**
+   * Fallback models tried in order if the primary model fails.
+   * Format: "provider/model" (e.g. "anthropic/claude-sonnet-4-5")
+   * or just "model" (uses the same provider as the primary).
+   */
+  fallbackModels?: string[];
+
   /** Max agent loop turns before stopping */
   maxTurns?: number;
 }

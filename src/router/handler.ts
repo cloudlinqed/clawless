@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel, getProviders, getModels, getEnvApiKey } from "@mariozechner/pi-ai";
 import type { AgentDef } from "../config/agent-def.js";
 import { runAgent } from "../runtime/agent.js";
 import { runAgentStream } from "../runtime/stream.js";
@@ -27,6 +27,75 @@ export const app = new Hono();
 
 const DEFAULT_PROVIDER = process.env.DEFAULT_PROVIDER ?? "openai";
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL;
+const DEFAULT_FALLBACKS = process.env.DEFAULT_FALLBACK_MODELS
+  ? process.env.DEFAULT_FALLBACK_MODELS.split(",").map((s) => s.trim())
+  : [];
+
+/**
+ * Parse a model spec into provider + modelId.
+ * Formats: "provider/modelId" or just "modelId" (inherits provider).
+ */
+function parseModelSpec(spec: string, defaultProvider: string): { provider: string; modelId: string } {
+  if (spec.includes("/")) {
+    const [provider, ...rest] = spec.split("/");
+    return { provider, modelId: rest.join("/") };
+  }
+  return { provider: defaultProvider, modelId: spec };
+}
+
+/**
+ * Build ordered model chain: primary + fallbacks.
+ * Returns resolved Model objects. Skips invalid entries.
+ */
+function resolveModelChain(
+  primaryProvider: string,
+  primaryModelId: string,
+  fallbacks: string[]
+): Array<{ model: ReturnType<typeof getModel>; label: string }> {
+  const chain: Array<{ model: ReturnType<typeof getModel>; label: string }> = [];
+
+  try {
+    chain.push({
+      model: getModel(primaryProvider as any, primaryModelId as any),
+      label: `${primaryProvider}/${primaryModelId}`,
+    });
+  } catch {
+    // Primary invalid — still try fallbacks
+  }
+
+  for (const spec of fallbacks) {
+    const { provider, modelId } = parseModelSpec(spec, primaryProvider);
+    try {
+      chain.push({
+        model: getModel(provider as any, modelId as any),
+        label: `${provider}/${modelId}`,
+      });
+    } catch {
+      // Skip invalid fallback
+    }
+  }
+
+  return chain;
+}
+
+/** Check if an error is retryable (rate limit, auth, server error). */
+function isRetryableError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("rate limit") ||
+    lower.includes("429") ||
+    lower.includes("503") ||
+    lower.includes("502") ||
+    lower.includes("overloaded") ||
+    lower.includes("capacity") ||
+    lower.includes("quota") ||
+    lower.includes("billing") ||
+    lower.includes("unauthorized") ||
+    lower.includes("401") ||
+    lower.includes("403")
+  );
+}
 
 // CORS
 app.use("/api/*", cors({
@@ -51,11 +120,11 @@ async function resolveRequest(data: AgentRequestBody, agentDef: AgentDef) {
     return { error: "No model configured. Set DEFAULT_MODEL in .env" } as const;
   }
 
-  let model;
-  try {
-    model = getModel(provider as any, modelId as any);
-  } catch {
-    return { error: `Unknown model: ${provider}/${modelId}` } as const;
+  // Build model chain: primary + fallbacks
+  const fallbacks = data.fallbackModels ?? agentDef.fallbackModels ?? DEFAULT_FALLBACKS;
+  const modelChain = resolveModelChain(provider, modelId, fallbacks);
+  if (modelChain.length === 0) {
+    return { error: `No valid models found. Primary: ${provider}/${modelId}` } as const;
   }
 
   const store = getSessionStore();
@@ -79,7 +148,7 @@ async function resolveRequest(data: AgentRequestBody, agentDef: AgentDef) {
     ...getEnabledBuiltins({ userId, sessionKey: currentKey }),
   ];
 
-  return { model, session, currentKey, maxTurns, userId, allTools } as const;
+  return { modelChain, session, currentKey, maxTurns, userId, allTools } as const;
 }
 
 function resolveAgent(data: AgentRequestBody) {
@@ -119,6 +188,64 @@ app.get("/api/health", (c) => {
     defaultProvider: DEFAULT_PROVIDER,
     defaultModel: DEFAULT_MODEL,
   });
+});
+
+// ── Providers ──
+// List available AI providers and their models.
+
+const PROVIDER_ENV_MAP: Record<string, string> = {
+  openai: "OPENAI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+  google: "GEMINI_API_KEY",
+  "google-vertex": "GOOGLE_CLOUD_API_KEY",
+  "amazon-bedrock": "AWS_ACCESS_KEY_ID",
+  "azure-openai-responses": "AZURE_OPENAI_API_KEY",
+  groq: "GROQ_API_KEY",
+  cerebras: "CEREBRAS_API_KEY",
+  xai: "XAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  mistral: "MISTRAL_API_KEY",
+};
+
+app.get("/api/providers", (c) => {
+  const providers = getProviders()
+    .filter((p) => !["google-gemini-cli", "google-antigravity", "openai-codex", "github-copilot", "opencode", "opencode-go", "kimi-coding", "minimax", "minimax-cn", "huggingface", "zai", "vercel-ai-gateway"].includes(p))
+    .map((provider) => {
+      const models = getModels(provider as any).map((m) => ({
+        id: m.id,
+        name: m.name,
+        reasoning: m.reasoning,
+        contextWindow: m.contextWindow,
+        maxTokens: m.maxTokens,
+        input: m.input,
+      }));
+
+      const envVar = PROVIDER_ENV_MAP[provider];
+      const configured = !!getEnvApiKey(provider);
+
+      return { provider, envVar, configured, models };
+    });
+
+  return c.json({ providers });
+});
+
+app.get("/api/providers/:provider/models", (c) => {
+  const provider = c.req.param("provider");
+  try {
+    const models = getModels(provider as any).map((m) => ({
+      id: m.id,
+      name: m.name,
+      reasoning: m.reasoning,
+      contextWindow: m.contextWindow,
+      maxTokens: m.maxTokens,
+      input: m.input,
+      cost: m.cost,
+    }));
+    const configured = !!getEnvApiKey(provider);
+    return c.json({ provider, configured, models });
+  } catch {
+    return c.json({ error: `Unknown provider: ${provider}` }, 404);
+  }
 });
 
 // ── Capabilities ──
@@ -181,36 +308,49 @@ app.post("/api/agent", async (c) => {
   const resolved = await resolveRequest(parsed.data, agentDef);
   if ("error" in resolved) return c.json(resolved, 400);
 
-  const { model, session, currentKey, maxTurns, userId, allTools } = resolved;
+  const { modelChain, session, currentKey, maxTurns, userId, allTools } = resolved;
   const timeoutMs = Number(process.env.TIMEOUT_MS) || 120_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const result = await runAgent(parsed.data.prompt, {
-      model,
-      systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
-      tools: allTools,
-      messages: session?.messages,
-      maxTurns,
-      signal: controller.signal,
-    });
+    let lastError: unknown;
+    let usedModel = modelChain[0].label;
 
-    await saveSession(currentKey, userId, agentDef.name, result.messages, session);
+    for (const { model, label } of modelChain) {
+      try {
+        const result = await runAgent(parsed.data.prompt, {
+          model,
+          systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
+          tools: allTools,
+          messages: session?.messages,
+          maxTurns,
+          signal: controller.signal,
+        });
 
-    return c.json({
-      sessionKey: currentKey,
-      agent: agentDef.name,
-      result: result.result,
-      toolCalls: result.toolCalls,
-      usage: result.usage,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+        await saveSession(currentKey, userId, agentDef.name, result.messages, session);
+
+        return c.json({
+          sessionKey: currentKey,
+          agent: agentDef.name,
+          model: label,
+          result: result.result,
+          toolCalls: result.toolCalls,
+          usage: result.usage,
+        });
+      } catch (err) {
+        lastError = err;
+        usedModel = label;
+        if (!isRetryableError(err) || controller.signal.aborted) break;
+        // Retryable — try next model in chain
+      }
+    }
+
+    const message = lastError instanceof Error ? lastError.message : String(lastError);
     if (controller.signal.aborted) {
       return c.json({ error: "Request timed out", details: message }, 504);
     }
-    return c.json({ error: "Agent execution failed", details: message }, 500);
+    return c.json({ error: "Agent execution failed", model: usedModel, details: message }, 500);
   } finally {
     clearTimeout(timeout);
   }
@@ -231,40 +371,59 @@ app.post("/api/agent/stream", async (c) => {
   const resolved = await resolveRequest(parsed.data, agentDef);
   if ("error" in resolved) return c.json(resolved, 400);
 
-  const { model, session, currentKey, maxTurns, userId, allTools } = resolved;
+  const { modelChain, session, currentKey, maxTurns, userId, allTools } = resolved;
   const timeoutMs = Number(process.env.TIMEOUT_MS) || 120_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   return streamSSE(c, async (stream) => {
     try {
-      const events = runAgentStream(parsed.data.prompt, {
-        model,
-        systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
-        tools: allTools,
-        messages: session?.messages,
-        maxTurns,
-        signal: controller.signal,
-        sessionId: currentKey,
-      });
+      let lastError: unknown;
 
-      let returnValue: Awaited<ReturnType<typeof events.next>> | undefined;
-      while (true) {
-        returnValue = await events.next();
-        if (returnValue.done) break;
-        const sseEvent = returnValue.value;
-        await stream.writeSSE({
-          event: sseEvent.event,
-          data: "data" in sseEvent ? JSON.stringify(sseEvent.data) : "{}",
-        });
+      for (const { model, label } of modelChain) {
+        try {
+          await stream.writeSSE({
+            event: "model_selected",
+            data: JSON.stringify({ model: label }),
+          });
+
+          const events = runAgentStream(parsed.data.prompt, {
+            model,
+            systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
+            tools: allTools,
+            messages: session?.messages,
+            maxTurns,
+            signal: controller.signal,
+            sessionId: currentKey,
+          });
+
+          let returnValue: Awaited<ReturnType<typeof events.next>> | undefined;
+          while (true) {
+            returnValue = await events.next();
+            if (returnValue.done) break;
+            const sseEvent = returnValue.value;
+            await stream.writeSSE({
+              event: sseEvent.event,
+              data: "data" in sseEvent ? JSON.stringify(sseEvent.data) : "{}",
+            });
+          }
+
+          const messages = returnValue?.value;
+          if (messages && messages.length > 0) {
+            await saveSession(currentKey, userId, agentDef.name, messages, session);
+          }
+          return; // Success — done
+        } catch (err) {
+          lastError = err;
+          if (!isRetryableError(err) || controller.signal.aborted) break;
+          await stream.writeSSE({
+            event: "model_fallback",
+            data: JSON.stringify({ failed: label, reason: err instanceof Error ? err.message : String(err) }),
+          });
+        }
       }
 
-      const messages = returnValue?.value;
-      if (messages && messages.length > 0) {
-        await saveSession(currentKey, userId, agentDef.name, messages, session);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = lastError instanceof Error ? lastError.message : String(lastError);
       await stream.writeSSE({
         event: "error",
         data: JSON.stringify({ message }),

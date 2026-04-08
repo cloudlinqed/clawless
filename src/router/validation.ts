@@ -7,6 +7,7 @@ export const AgentRequestSchema = z.object({
   sessionKey: z.string().optional(),
   model: z.string().optional(),
   provider: z.string().optional(),
+  fallbackModels: z.array(z.string()).optional(),
   maxTurns: z.number().int().min(1).max(50).optional(),
 });
 

@@ -116,6 +116,7 @@ Run the agent with a prompt. Returns the full result when complete.
 | `sessionKey` | No | Pass a previous `sessionKey` to continue a conversation |
 | `model` | No | Override model (default from `DEFAULT_MODEL` env) |
 | `provider` | No | Override provider (default from `DEFAULT_PROVIDER` env) |
+| `fallbackModels` | No | Backup models tried if primary fails (e.g. `["anthropic/claude-sonnet-4-5", "gpt-4o-mini"]`) |
 | `maxTurns` | No | Max agent loop iterations (default: 10) |
 
 **Response:**
@@ -150,6 +151,8 @@ Same request as `/api/agent`, returns Server-Sent Events (SSE) for real-time str
 
 | Event | Data | When |
 |-------|------|------|
+| `model_selected` | `{ model }` | Which model is being used |
+| `model_fallback` | `{ failed, reason }` | Primary failed, trying next model |
 | `agent_start` | `{}` | Agent begins processing |
 | `turn_start` | `{ turn }` | New LLM turn begins |
 | `text_delta` | `{ delta }` | Incremental text token |
@@ -372,37 +375,119 @@ defineTool({
 })
 ```
 
-## Supported models
+### Providers API
 
-Any model supported by the Pi SDK:
+Discover available AI providers, their models, and whether they're configured.
 
-| Provider | Model ID | Notes |
-|----------|----------|-------|
-| `openai` | `gpt-4o` | Default |
-| `openai` | `gpt-4o-mini` | Faster, cheaper |
-| `anthropic` | `claude-sonnet-4-5` | Strong at tool use |
-| `anthropic` | `claude-opus-4-6` | Most capable |
-| `google` | `gemini-2.5-pro` | Google alternative |
+```
+GET /api/providers
+```
+
+```json
+{
+  "providers": [
+    {
+      "provider": "openai",
+      "envVar": "OPENAI_API_KEY",
+      "configured": true,
+      "models": [
+        { "id": "gpt-4o", "name": "GPT-4o", "reasoning": false, "contextWindow": 128000 },
+        { "id": "gpt-4o-mini", "name": "GPT-4o Mini", "reasoning": false, "contextWindow": 128000 }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "envVar": "ANTHROPIC_API_KEY",
+      "configured": false,
+      "models": [...]
+    }
+  ]
+}
+```
+
+Get models for a specific provider with cost info:
+
+```
+GET /api/providers/anthropic/models
+```
+
+The frontend can use these endpoints to let users pick their provider and model during setup.
+
+## Supported providers
+
+Any provider supported by the Pi SDK. Set `DEFAULT_PROVIDER` and `DEFAULT_MODEL` in `.env`, plus the matching API key.
+
+| Provider | Env var | Example models |
+|----------|---------|----------------|
+| `openai` | `OPENAI_API_KEY` | `gpt-4o`, `gpt-4o-mini` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5`, `claude-opus-4-6` |
+| `google` | `GEMINI_API_KEY` | `gemini-2.5-pro`, `gemini-2.5-flash` |
+| `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
+| `xai` | `XAI_API_KEY` | `grok-3`, `grok-3-mini` |
+| `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` |
+| `openrouter` | `OPENROUTER_API_KEY` | Any model via OpenRouter |
+| `cerebras` | `CEREBRAS_API_KEY` | `llama-4-scout-17b` |
+| `amazon-bedrock` | `AWS_ACCESS_KEY_ID` | Bedrock models |
+| `azure-openai-responses` | `AZURE_OPENAI_API_KEY` | Azure-hosted OpenAI models |
+
+Use `GET /api/providers` to see all available providers and models with live configuration status.
+
+## Model fallback
+
+Configure backup models that are tried in order if the primary fails (rate limit, auth error, outage). Fallbacks can cross providers.
+
+**Via env (global default):**
+```
+DEFAULT_PROVIDER=openai
+DEFAULT_MODEL=gpt-4o
+DEFAULT_FALLBACK_MODELS=anthropic/claude-sonnet-4-5,gpt-4o-mini
+```
+
+**Via agent config:**
+```ts
+defineAgent({
+  name: "my-agent",
+  model: "gpt-4o",
+  provider: "openai",
+  fallbackModels: ["anthropic/claude-sonnet-4-5", "gpt-4o-mini"],
+  ...
+});
+```
+
+**Via request (per-call override):**
+```json
+{
+  "prompt": "...",
+  "userId": "user-1",
+  "model": "gpt-4o",
+  "fallbackModels": ["anthropic/claude-sonnet-4-5", "groq/llama-3.3-70b-versatile"]
+}
+```
+
+Format: `"provider/model"` for cross-provider, or just `"model"` to use the same provider. The streaming endpoint emits `model_selected` and `model_fallback` events so the frontend can show which model is being used.
 
 ## Environment variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DEFAULT_PROVIDER` | No | `openai` | AI provider |
-| `DEFAULT_MODEL` | Yes | — | Model ID (e.g. `gpt-4o`) |
-| `OPENAI_API_KEY` | Yes* | — | API key for OpenAI |
+| `DEFAULT_PROVIDER` | Yes | `openai` | AI provider (see supported providers) |
+| `DEFAULT_MODEL` | Yes | — | Model ID (e.g. `gpt-4o`, `claude-sonnet-4-5`) |
+| `DEFAULT_FALLBACK_MODELS` | No | — | Comma-separated fallbacks (e.g. `anthropic/claude-sonnet-4-5,gpt-4o-mini`) |
+| `OPENAI_API_KEY` | * | — | API key for OpenAI |
+| `ANTHROPIC_API_KEY` | * | — | API key for Anthropic |
+| `GEMINI_API_KEY` | * | — | API key for Google Gemini |
 | `PORT` | No | `3000` | Server port |
 | `CORS_ORIGIN` | No | `localhost:*` | Allowed origins |
 | `MAX_TURNS` | No | `10` | Max agent loop iterations |
 | `TIMEOUT_MS` | No | `120000` | Request timeout in ms |
 | `MAX_KNOWLEDGE_CHARS` | No | `100000` | Max total knowledge size |
 | `DATA_DIR` | No | `.clawless` | Persisted data directory |
-| `VISION_PROVIDER` | No | `openai` | Provider for image_analyze |
+| `VISION_PROVIDER` | No | inherit | Provider for image_analyze |
 | `VISION_MODEL` | No | `gpt-4o` | Model for image_analyze |
 | `IMAGE_MODEL` | No | `dall-e-3` | Model for image_generate |
 | `TTS_MODEL` | No | `tts-1` | Model for text_to_speech |
 
-*Required for the default OpenAI provider. Use the matching env var for other providers.
+*Set the API key matching your `DEFAULT_PROVIDER`. See the providers table for env var names.
 
 ## Deploy
 
