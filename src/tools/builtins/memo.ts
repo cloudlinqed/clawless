@@ -1,26 +1,6 @@
 import { defineTool, Type } from "../interface.js";
-
-/**
- * Per-user memo store. Agents use this to persist notes across turns
- * and sessions. Scoped by userId so users don't see each other's memos.
- */
-const memoStore = new Map<string, Map<string, string>>();
-
-function getUserMemos(userId: string): Map<string, string> {
-  let memos = memoStore.get(userId);
-  if (!memos) {
-    memos = new Map();
-    memoStore.set(userId, memos);
-  }
-  return memos;
-}
-
-// userId is injected at runtime by the handler before tool execution
-let currentUserId = "default";
-
-export function setMemoUserId(userId: string): void {
-  currentUserId = userId;
-}
+import { getMemoStore } from "../../memo/index.js";
+import { requireRequestContext } from "../../runtime/request-context.js";
 
 export const storeMemoTool = defineTool({
   name: "store_memo",
@@ -35,9 +15,11 @@ export const storeMemoTool = defineTool({
     content: Type.String({ description: "The information to remember" }),
   }),
   execute: async (params) => {
-    const memos = getUserMemos(currentUserId);
-    memos.set(params.key, params.content);
-    return JSON.stringify({ ok: true, key: params.key, totalMemos: memos.size });
+    const { userId } = requireRequestContext();
+    const memos = getMemoStore();
+    const saved = await memos.setMemo(userId, params.key, params.content);
+    const all = await memos.listMemos(userId);
+    return JSON.stringify({ ok: true, key: saved.key, totalMemos: all.length });
   },
 });
 
@@ -51,21 +33,23 @@ export const recallMemoTool = defineTool({
     key: Type.Optional(Type.String({ description: "The memo key to recall. Omit to list all keys." })),
   }),
   execute: async (params) => {
-    const memos = getUserMemos(currentUserId);
+    const { userId } = requireRequestContext();
+    const memos = getMemoStore();
 
     if (params.key) {
-      const content = memos.get(params.key);
-      if (!content) {
-        return JSON.stringify({ found: false, key: params.key, availableKeys: Array.from(memos.keys()) });
+      const memo = await memos.getMemo(userId, params.key);
+      if (!memo) {
+        const available = await memos.listMemos(userId);
+        return JSON.stringify({ found: false, key: params.key, availableKeys: available.map((entry) => entry.key) });
       }
-      return JSON.stringify({ found: true, key: params.key, content });
+      return JSON.stringify({ found: true, key: params.key, content: memo.content });
     }
 
-    // List all
+    const memoEntries = await memos.listMemos(userId);
     const entries: Record<string, string> = {};
-    for (const [k, v] of memos) {
-      entries[k] = v.length > 200 ? v.slice(0, 200) + "..." : v;
+    for (const memo of memoEntries) {
+      entries[memo.key] = memo.content.length > 200 ? memo.content.slice(0, 200) + "..." : memo.content;
     }
-    return JSON.stringify({ totalMemos: memos.size, memos: entries });
+    return JSON.stringify({ totalMemos: Object.keys(entries).length, memos: entries });
   },
 });

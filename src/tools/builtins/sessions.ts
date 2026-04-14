@@ -1,18 +1,7 @@
 import { defineTool, Type } from "../interface.js";
 import { getSessionStore } from "../../session/index.js";
 import type { Message, AssistantMessage } from "@mariozechner/pi-ai";
-
-/**
- * Session tools — let the agent introspect its own conversation history.
- * All operations are scoped to the current user — the agent never sees
- * other users' sessions.
- */
-
-let currentUserId = "default";
-
-export function setSessionsUserId(userId: string): void {
-  currentUserId = userId;
-}
+import { requireRequestContext } from "../../runtime/request-context.js";
 
 export const sessionsListTool = defineTool({
   name: "sessions_list",
@@ -27,8 +16,9 @@ export const sessionsListTool = defineTool({
     ),
   }),
   execute: async (params) => {
+    const { userId } = requireRequestContext();
     const store = getSessionStore();
-    const sessions = await store.list(currentUserId);
+    const sessions = await store.list(userId);
 
     const sorted = sessions
       .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -60,8 +50,9 @@ export const sessionsHistoryTool = defineTool({
     ),
   }),
   execute: async (params) => {
+    const { userId } = requireRequestContext();
     const store = getSessionStore();
-    const session = await store.load(params.sessionKey, currentUserId);
+    const session = await store.load(params.sessionKey, userId);
 
     if (!session) {
       return JSON.stringify({ error: "Session not found or access denied" });

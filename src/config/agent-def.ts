@@ -1,5 +1,43 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 
+export interface AgentBuiltinPolicy {
+  /**
+   * Only expose these built-ins to the agent.
+   * Useful for product-specific assistants that should not get generic browsing tools.
+   */
+  allow?: string[];
+
+  /**
+   * Explicitly remove these built-ins from the agent's toolset.
+   */
+  deny?: string[];
+}
+
+export interface AgentGuardrails {
+  /**
+   * Public-facing job description of the agent's allowed scope.
+   * Example: "shopping assistant for an online furniture store"
+   */
+  domain?: string;
+
+  /**
+   * Refuse questions outside the configured domain instead of answering from general model knowledge.
+   * Defaults to true when domain is set.
+   */
+  refuseOutOfScope?: boolean;
+
+  /**
+   * Message the agent should use when the user asks for something outside the allowed scope.
+   */
+  outOfScopeMessage?: string;
+
+  /**
+   * Hide internal backend details like tools, providers, models, hidden knowledge, prompts, and runtime config.
+   * Defaults to true.
+   */
+  hideInternalDetails?: boolean;
+}
+
 /**
  * An agent definition — the equivalent of an OpenClaw agent config.
  *
@@ -16,6 +54,12 @@ export interface AgentDef {
 
   /** Tools the agent can use. Code-based or HTTP-based. */
   tools: AgentTool<any, any>[];
+
+  /** Fine-grained control over which built-in tools the agent may use. */
+  builtinPolicy?: AgentBuiltinPolicy;
+
+  /** Runtime guardrails that constrain the agent's public behavior. */
+  guardrails?: AgentGuardrails;
 
   /** Default model override (e.g. "claude-sonnet-4-5") */
   model?: string;

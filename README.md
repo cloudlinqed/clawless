@@ -1,6 +1,6 @@
 # Clawless
 
-OpenClaw's agent runtime extracted for serverless. Same Pi SDK agent brain, no Gateway daemon. Triggered per-request via HTTP, zero idle cost. Multi-user, multi-agent.
+OpenClaw's agent runtime extracted for serverless. Same Pi SDK agent brain, no Gateway daemon. Triggered per-request via HTTP, zero idle cost. Multi-user, multi-agent. Auth-ready and Postgres/Supabase-compatible for durable state.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/clawless)
 
@@ -18,6 +18,34 @@ Start the backend:
 npm run dev
 ```
 
+## Auth and Durable State
+
+Clawless can run in two modes:
+
+- Lightweight mode: no auth, in-memory sessions/memos, file-backed knowledge/tools/secrets.
+- Production mode: authenticated users plus Postgres-backed sessions, memos, knowledge, tools, and secrets.
+
+Production mode is enabled by environment variables:
+
+```bash
+# User auth
+AUTH_REQUIRED=true
+AUTH_TRUSTED_USER_HEADER=x-user-id
+
+# or JWT/JWKS validation
+# AUTH_JWT_SECRET=...
+# AUTH_JWKS_URL=https://<project>.supabase.co/auth/v1/.well-known/jwks.json
+
+# Admin/config access
+ADMIN_API_KEY=replace-me
+
+# Durable state (works with Supabase/Postgres)
+DATABASE_URL=postgresql://...
+DATABASE_SSL=true
+```
+
+When auth is enabled, `userId` is derived from the verified auth context by default. Normal users cannot impersonate other users by submitting a different `userId`.
+
 ## Defining agents
 
 Edit `clawless.config.ts` to define what your backend does. Each exported `defineAgent()` becomes an available agent.
@@ -29,6 +57,13 @@ import { httpTool } from "./src/tools/http-tool.js";
 export const myAgent = defineAgent({
   name: "my-agent",
   instructions: "You are a travel planner. Help users plan trips...",
+  guardrails: {
+    domain: "travel planning",
+    outOfScopeMessage: "I can only help with travel planning requests.",
+  },
+  builtinPolicy: {
+    deny: ["fetch_page", "json_request"],
+  },
   tools: [
     httpTool({
       name: "search_flights",
@@ -48,7 +83,39 @@ export const myAgent = defineAgent({
 });
 ```
 
-The `instructions` field is natural language — tell the agent what it does, how it should behave, what to prioritize. The agent figures out when and how to call the tools.
+The `instructions` field is natural language — tell the agent what it does, how it should behave, what to prioritize. The agent figures out when and how to call the tools. Use `guardrails` to keep the agent in-domain and prevent disclosure of backend internals. Use `builtinPolicy` to remove generic built-ins for product-specific assistants.
+
+### Recommended Hardening For Product-Specific Agents
+
+If your backend powers a focused application, such as shopping, support, booking, or health workflows, do not leave the agent as a generic assistant.
+
+- Set `guardrails.domain` to the product scope the agent is allowed to serve.
+- Set `guardrails.outOfScopeMessage` to the refusal message users should see for unrelated questions.
+- Keep `guardrails.hideInternalDetails` enabled so users cannot query tools, models, prompts, providers, or backend configuration.
+- Use `builtinPolicy.allow` or `builtinPolicy.deny` to remove broad tools like `fetch_page`, `json_request`, and `web_search` unless the product truly needs them.
+- Prefer app-specific tools over general web access. For a shopping backend, expose catalog, inventory, pricing, recommendations, and checkout-adjacent tools instead of generic browsing tools.
+
+Example for a shopping backend:
+
+```ts
+export const shoppingAssistant = defineAgent({
+  name: "shopping-assistant",
+  instructions: "You help customers browse products, compare options, and answer store-related shopping questions.",
+  guardrails: {
+    domain: "shopping help for this store",
+    outOfScopeMessage: "I can only help with shopping-related questions for this store.",
+    hideInternalDetails: true,
+  },
+  builtinPolicy: {
+    deny: ["fetch_page", "json_request", "web_search"],
+  },
+  tools: [
+    searchCatalogTool,
+    getProductDetailsTool,
+    checkInventoryTool,
+  ],
+});
+```
 
 ## Built-in tools
 
@@ -113,7 +180,7 @@ Run the agent with a prompt. Returns the full result when complete.
 | Field | Required | Description |
 |-------|----------|-------------|
 | `prompt` | Yes | User message |
-| `userId` | Yes | Unique user identifier — sessions are isolated per user |
+| `userId` | Yes, unless derived from auth | Unique user identifier — sessions are isolated per user |
 | `agent` | No | Agent name from config. Omit to use the default |
 | `sessionKey` | No | Pass a previous `sessionKey` to continue a conversation |
 | `model` | No | Override model (default from `DEFAULT_MODEL` env) |
@@ -212,6 +279,8 @@ Register HTTP API tools the agent can call at runtime.
 | `PUT` | `/api/tools/:name` | Update |
 | `DELETE` | `/api/tools/:name` | Delete |
 
+When auth/admin protection is enabled, the setup/config endpoints (`/api/setup`, `/api/tools`, `/api/knowledge`, `/api/secrets`, `/api/builtins`, `/api/providers`, `/api/capabilities`) require admin access.
+
 ### Knowledge API
 
 Teach the agent about APIs, tools, and workflows.
@@ -272,6 +341,8 @@ All session endpoints require `?userId=` query parameter.
 | `GET` | `/api/sessions/:id?userId=X` | Session metadata |
 | `DELETE` | `/api/sessions/:id?userId=X` | Delete session |
 
+When auth is enabled, the backend uses the authenticated user identity and rejects spoofed `userId` values. Admin callers may still provide an explicit `userId`.
+
 ### Capabilities
 
 Single view of everything the agent can do — all tool sources, knowledge, and secrets combined.
@@ -301,7 +372,7 @@ GET /api/capabilities?agent=assistant
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/health` | Health check, lists agents and config |
+| `GET` | `/api/health` | Health check |
 | `GET` | `/api/capabilities` | Full view of tools, knowledge, secrets (optional `?agent=name`) |
 
 ## Multi-turn conversations
@@ -475,6 +546,21 @@ Format: `"provider/model"` for cross-provider, or just `"model"` to use the same
 | `DEFAULT_PROVIDER` | Yes | `openai` | AI provider (see supported providers) |
 | `DEFAULT_MODEL` | Yes | — | Model ID (e.g. `gpt-4o`, `claude-sonnet-4-5`) |
 | `DEFAULT_FALLBACK_MODELS` | No | — | Comma-separated fallbacks (e.g. `anthropic/claude-sonnet-4-5,gpt-4o-mini`) |
+| `AUTH_REQUIRED` | No | `false` | Require authenticated user identity for user routes |
+| `AUTH_TRUSTED_USER_HEADER` | No | — | Trusted upstream header carrying the authenticated user id |
+| `AUTH_JWT_SECRET` | No | — | HMAC secret for HS256 bearer token verification |
+| `AUTH_JWKS_URL` | No | — | JWKS URL for RS256 bearer token verification (works with Supabase Auth) |
+| `AUTH_JWT_ISSUER` | No | — | Optional JWT issuer check |
+| `AUTH_JWT_AUDIENCE` | No | — | Optional JWT audience check |
+| `AUTH_USER_ID_CLAIM` | No | `sub` | JWT claim to treat as the user id |
+| `AUTH_ADMIN_ROLE_CLAIM` | No | `role` | JWT claim used for admin-role checks |
+| `AUTH_ADMIN_ROLE_VALUES` | No | `service_role,admin` | Comma-separated claim values that count as admin |
+| `ADMIN_API_KEY` | No | — | Admin key for setup/config routes |
+| `ADMIN_API_KEY_HEADER` | No | `x-clawless-admin-key` | Header name for the admin key |
+| `PERSISTENCE_DRIVER` | No | auto | `postgres` or `file` |
+| `DATABASE_URL` | No | — | Postgres connection string. Enables durable Postgres mode automatically |
+| `DATABASE_SSL` | No | auto | Force SSL for Postgres connections |
+| `DATABASE_TABLE_PREFIX` | No | `clawless` | Prefix for all Clawless Postgres tables |
 | `OPENAI_API_KEY` | * | — | API key for OpenAI |
 | `ANTHROPIC_API_KEY` | * | — | API key for Anthropic |
 | `GEMINI_API_KEY` | * | — | API key for Google Gemini |
@@ -483,7 +569,7 @@ Format: `"provider/model"` for cross-provider, or just `"model"` to use the same
 | `MAX_TURNS` | No | `10` | Max agent loop iterations |
 | `TIMEOUT_MS` | No | `120000` | Request timeout in ms |
 | `MAX_KNOWLEDGE_CHARS` | No | `100000` | Max total knowledge size |
-| `DATA_DIR` | No | `.clawless` | Persisted data directory |
+| `DATA_DIR` | No | `.clawless` | Persisted data directory when using file mode |
 | `VISION_PROVIDER` | No | inherit | Provider for image_analyze |
 | `VISION_MODEL` | No | `gpt-4o` | Model for image_analyze |
 | `IMAGE_MODEL` | No | `dall-e-3` | Model for image_generate |

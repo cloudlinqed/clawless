@@ -1,10 +1,10 @@
 # Deploy and Host Clawless on Railway
 
-Clawless is OpenClaw's agent runtime extracted for serverless. It provides a ready-to-use AI agent backend with 14 built-in tools, SSE streaming, multi-turn sessions, and user isolation. Configure your agent's tools, knowledge, and API keys from any frontend via REST API — no redeployment needed. Supports 11 AI providers with automatic model fallback.
+Clawless is OpenClaw's agent runtime extracted for serverless. It provides a ready-to-use AI agent backend with 14 built-in tools, SSE streaming, multi-turn sessions, user isolation, auth-ready request handling, and Postgres/Supabase-compatible durable state. Configure your agent's tools, knowledge, and API keys from any frontend via REST API — no redeployment needed. Supports 11 AI providers with automatic model fallback.
 
 ## About Hosting Clawless
 
-Deploying Clawless on Railway takes under a minute. Click the deploy button, set three environment variables (provider, model, API key), and your agent backend is live. Railway handles the Node.js build, port assignment, and health checks automatically. Clawless persists tool configurations, knowledge, and secrets to the local filesystem, which Railway maintains across restarts. Your frontend connects via REST API to send prompts, register tools, teach the agent, and stream responses. No additional databases or services are required for basic usage — everything runs in a single Railway service.
+Deploying Clawless on Railway takes under a minute. Click the deploy button, set your provider/model/API key, and your agent backend is live. Railway handles the Node.js build, port assignment, and health checks automatically. For production use, add a Postgres database and set `DATABASE_URL` so sessions, memos, tools, knowledge, and secrets survive restarts and scale-out. Your frontend connects via REST API to send prompts, register tools, teach the agent, and stream responses.
 
 ## Common Use Cases
 

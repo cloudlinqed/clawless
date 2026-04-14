@@ -3,20 +3,14 @@ import { fetchPageTool } from "./fetch-page.js";
 import { jsonRequestTool } from "./json-request.js";
 import { webSearchTool } from "./web-search.js";
 import { currentDatetimeTool } from "./current-datetime.js";
-import { storeMemoTool, recallMemoTool, setMemoUserId } from "./memo.js";
-import { updatePlanTool, setPlanSessionKey } from "./update-plan.js";
-import { sessionsListTool, sessionsHistoryTool, setSessionsUserId } from "./sessions.js";
-import { sessionsSpawnTool, setSpawnContext } from "./sessions-spawn.js";
-import { subagentsTool, setSubagentsSessionKey } from "./subagents.js";
+import { storeMemoTool, recallMemoTool } from "./memo.js";
+import { updatePlanTool } from "./update-plan.js";
+import { sessionsListTool, sessionsHistoryTool } from "./sessions.js";
+import { sessionsSpawnTool } from "./sessions-spawn.js";
+import { subagentsTool } from "./subagents.js";
 import { imageAnalyzeTool } from "./image-analyze.js";
 import { imageGenerateTool } from "./image-generate.js";
 import { ttsTool } from "./tts.js";
-
-export { setMemoUserId } from "./memo.js";
-export { setPlanSessionKey } from "./update-plan.js";
-export { setSessionsUserId } from "./sessions.js";
-export { setSpawnContext } from "./sessions-spawn.js";
-export { setSubagentsSessionKey } from "./subagents.js";
 
 /**
  * All available built-in tools and their default enabled state.
@@ -72,15 +66,8 @@ export function listBuiltins(): Array<{ name: string; enabled: boolean; descript
 
 /**
  * Get all enabled built-in tools. Called at agent runtime.
- * Sets the userId/sessionKey context for user-scoped tools.
  */
-export function getEnabledBuiltins(context: { userId: string; sessionKey: string }): AgentTool<any, any>[] {
-  setMemoUserId(context.userId);
-  setPlanSessionKey(context.sessionKey);
-  setSessionsUserId(context.userId);
-  setSpawnContext(context.sessionKey, context.userId);
-  setSubagentsSessionKey(context.sessionKey);
-
+export function getEnabledBuiltins(): AgentTool<any, any>[] {
   const tools: AgentTool<any, any>[] = [];
   for (const [name, { tool, defaultEnabled }] of Object.entries(BUILTIN_CATALOG)) {
     const enabled = enabledOverrides.get(name) ?? defaultEnabled;

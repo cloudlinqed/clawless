@@ -1,12 +1,6 @@
 import { defineTool, Type } from "../interface.js";
 import { getSpawnedAgents, clearSpawnedAgents } from "./sessions-spawn.js";
 
-let currentSessionKey = "default";
-
-export function setSubagentsSessionKey(key: string): void {
-  currentSessionKey = key;
-}
-
 export const subagentsTool = defineTool({
   name: "subagents",
   label: "Manage Sub-Agents",
@@ -23,12 +17,12 @@ export const subagentsTool = defineTool({
     const action = params.action.toLowerCase();
 
     if (action === "clear") {
-      clearSpawnedAgents(currentSessionKey);
+      clearSpawnedAgents();
       return JSON.stringify({ ok: true, message: "Spawn history cleared" });
     }
 
     // Default: list
-    const agents = getSpawnedAgents(currentSessionKey);
+    const agents = getSpawnedAgents();
 
     if (agents.length === 0) {
       return JSON.stringify({ agents: [], message: "No sub-agents have been spawned in this session" });

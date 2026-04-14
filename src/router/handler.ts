@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { getModel, getProviders, getModels, getEnvApiKey } from "@mariozechner/pi-ai";
 import type { AgentDef } from "../config/agent-def.js";
+import { initializeClawless } from "../bootstrap.js";
 import { runAgent } from "../runtime/agent.js";
 import { runAgentStream } from "../runtime/stream.js";
 import { getAgent, getDefaultAgent, listAgents } from "../config/agent-def.js";
@@ -21,6 +22,8 @@ import {
 } from "../tools/builtins/index.js";
 import { getSessionStore } from "../session/index.js";
 import type { SessionData } from "../session/store.js";
+import { createRequestContext, runWithRequestContext } from "../runtime/request-context.js";
+import { requireAdminAccess, resolveEffectiveUserId } from "../auth/index.js";
 import { AgentRequestSchema, type AgentRequestBody } from "./validation.js";
 
 export const app = new Hono();
@@ -93,6 +96,7 @@ function shouldFallback(err: unknown, signal?: AbortSignal): boolean {
 // CORS
 app.use("/api/*", cors({
   origin: (origin) => {
+    if (!origin) return "";
     const allowed = process.env.CORS_ORIGIN;
     if (allowed) return allowed.split(",").includes(origin) ? origin : "";
     if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) {
@@ -101,12 +105,46 @@ app.use("/api/*", cors({
     return "";
   },
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization"],
+  allowHeaders: [
+    "Content-Type",
+    "Authorization",
+    process.env.ADMIN_API_KEY_HEADER ?? "x-clawless-admin-key",
+    process.env.AUTH_TRUSTED_USER_HEADER ?? "",
+  ].filter(Boolean),
 }));
+
+app.use("/api/*", async (c, next) => {
+  try {
+    await initializeClawless();
+    await next();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: "Failed to initialize Clawless", details: message }, 500);
+  }
+});
 
 // ── Shared resolution ──
 
-async function resolveRequest(data: AgentRequestBody, agentDef: AgentDef) {
+function filterBuiltinsForAgent(agentDef: AgentDef) {
+  const builtins = getEnabledBuiltins();
+  const policy = agentDef.builtinPolicy;
+
+  let filtered = builtins;
+
+  if (policy?.allow && policy.allow.length > 0) {
+    const allowed = new Set(policy.allow);
+    filtered = filtered.filter((tool) => allowed.has(tool.name));
+  }
+
+  if (policy?.deny && policy.deny.length > 0) {
+    const denied = new Set(policy.deny);
+    filtered = filtered.filter((tool) => !denied.has(tool.name));
+  }
+
+  return filtered;
+}
+
+async function resolveRequest(userId: string, data: AgentRequestBody, agentDef: AgentDef) {
   const provider = data.provider ?? agentDef.provider ?? DEFAULT_PROVIDER;
   const modelId = data.model ?? agentDef.model ?? DEFAULT_MODEL;
   if (!modelId) {
@@ -121,7 +159,6 @@ async function resolveRequest(data: AgentRequestBody, agentDef: AgentDef) {
   }
 
   const store = getSessionStore();
-  const userId = data.userId;
   let session: SessionData | null = null;
   const currentKey = data.sessionKey ?? randomUUID();
 
@@ -138,7 +175,7 @@ async function resolveRequest(data: AgentRequestBody, agentDef: AgentDef) {
   const allTools = [
     ...agentDef.tools,
     ...buildDynamicTools(agentDef.name),
-    ...getEnabledBuiltins({ userId, sessionKey: currentKey }),
+    ...filterBuiltinsForAgent(agentDef),
   ];
 
   return { modelChain, session, currentKey, maxTurns, userId, allTools } as const;
@@ -175,12 +212,7 @@ async function saveSession(
 // ── Health ──
 
 app.get("/api/health", (c) => {
-  return c.json({
-    status: "ok",
-    agents: listAgents(),
-    defaultProvider: DEFAULT_PROVIDER,
-    defaultModel: DEFAULT_MODEL,
-  });
+  return c.json({ status: "ok" });
 });
 
 // ── Providers ──
@@ -200,7 +232,10 @@ const PROVIDER_ENV_MAP: Record<string, string> = {
   mistral: "MISTRAL_API_KEY",
 };
 
-app.get("/api/providers", (c) => {
+app.get("/api/providers", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const providers = getProviders()
     .filter((p) => !["google-gemini-cli", "google-antigravity", "openai-codex", "github-copilot", "opencode", "opencode-go", "kimi-coding", "minimax", "minimax-cn", "huggingface", "zai", "vercel-ai-gateway"].includes(p))
     .map((provider) => {
@@ -222,7 +257,10 @@ app.get("/api/providers", (c) => {
   return c.json({ providers });
 });
 
-app.get("/api/providers/:provider/models", (c) => {
+app.get("/api/providers/:provider/models", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const provider = c.req.param("provider");
   try {
     const models = getModels(provider as any).map((m) => ({
@@ -244,7 +282,10 @@ app.get("/api/providers/:provider/models", (c) => {
 // ── Capabilities ──
 // Single view of everything the agent can do.
 
-app.get("/api/capabilities", (c) => {
+app.get("/api/capabilities", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const agentName = c.req.query("agent");
   const agentDef = agentName ? getAgent(agentName) : getDefaultAgent();
 
@@ -298,10 +339,19 @@ app.post("/api/agent", async (c) => {
   const agentDef = resolveAgent(parsed.data);
   if ("error" in agentDef) return c.json(agentDef, 400);
 
-  const resolved = await resolveRequest(parsed.data, agentDef);
+  const identity = await resolveEffectiveUserId(c, parsed.data.userId);
+  if (!identity.ok) return c.json({ error: identity.error }, identity.status);
+
+  const resolved = await resolveRequest(identity.userId, parsed.data, agentDef);
   if ("error" in resolved) return c.json(resolved, 400);
 
   const { modelChain, session, currentKey, maxTurns, userId, allTools } = resolved;
+  const requestContext = createRequestContext({
+    userId,
+    sessionKey: currentKey,
+    agentName: agentDef.name,
+    auth: identity.auth,
+  });
   const timeoutMs = Number(process.env.TIMEOUT_MS) || 120_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -312,14 +362,14 @@ app.post("/api/agent", async (c) => {
 
     for (const { model, label } of modelChain) {
       try {
-        const result = await runAgent(parsed.data.prompt, {
+        const result = await runWithRequestContext(requestContext, () => runAgent(parsed.data.prompt, {
           model,
-          systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
+          systemPrompt: buildSystemPrompt(agentDef),
           tools: allTools,
           messages: session?.messages,
           maxTurns,
           signal: controller.signal,
-        });
+        }));
 
         await saveSession(currentKey, userId, agentDef.name, result.messages, session);
 
@@ -361,15 +411,24 @@ app.post("/api/agent/stream", async (c) => {
   const agentDef = resolveAgent(parsed.data);
   if ("error" in agentDef) return c.json(agentDef, 400);
 
-  const resolved = await resolveRequest(parsed.data, agentDef);
+  const identity = await resolveEffectiveUserId(c, parsed.data.userId);
+  if (!identity.ok) return c.json({ error: identity.error }, identity.status);
+
+  const resolved = await resolveRequest(identity.userId, parsed.data, agentDef);
   if ("error" in resolved) return c.json(resolved, 400);
 
   const { modelChain, session, currentKey, maxTurns, userId, allTools } = resolved;
+  const requestContext = createRequestContext({
+    userId,
+    sessionKey: currentKey,
+    agentName: agentDef.name,
+    auth: identity.auth,
+  });
   const timeoutMs = Number(process.env.TIMEOUT_MS) || 120_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  return streamSSE(c, async (stream) => {
+  return streamSSE(c, async (stream) => runWithRequestContext(requestContext, async () => {
     try {
       for (let i = 0; i < modelChain.length; i++) {
         const { model, label } = modelChain[i];
@@ -382,7 +441,7 @@ app.post("/api/agent/stream", async (c) => {
 
         const events = runAgentStream(parsed.data.prompt, {
           model,
-          systemPrompt: buildSystemPrompt(agentDef.instructions, agentDef.name),
+          systemPrompt: buildSystemPrompt(agentDef),
           tools: allTools,
           messages: session?.messages,
           maxTurns,
@@ -457,24 +516,24 @@ app.post("/api/agent/stream", async (c) => {
     } finally {
       clearTimeout(timeout);
     }
-  });
+  }));
 });
 
 // ── Sessions ──
 
 app.get("/api/sessions", async (c) => {
-  const userId = c.req.query("userId");
-  if (!userId) return c.json({ error: "userId query param required" }, 400);
+  const identity = await resolveEffectiveUserId(c, c.req.query("userId") ?? undefined);
+  if (!identity.ok) return c.json({ error: identity.error }, identity.status);
   const store = getSessionStore();
-  const sessions = await store.list(userId);
+  const sessions = await store.list(identity.userId);
   return c.json({ sessions });
 });
 
 app.get("/api/sessions/:id", async (c) => {
-  const userId = c.req.query("userId");
-  if (!userId) return c.json({ error: "userId query param required" }, 400);
+  const identity = await resolveEffectiveUserId(c, c.req.query("userId") ?? undefined);
+  if (!identity.ok) return c.json({ error: identity.error }, identity.status);
   const store = getSessionStore();
-  const session = await store.load(c.req.param("id"), userId);
+  const session = await store.load(c.req.param("id"), identity.userId);
   if (!session) return c.json({ error: "Session not found" }, 404);
   return c.json({
     id: session.id,
@@ -486,16 +545,19 @@ app.get("/api/sessions/:id", async (c) => {
 });
 
 app.delete("/api/sessions/:id", async (c) => {
-  const userId = c.req.query("userId");
-  if (!userId) return c.json({ error: "userId query param required" }, 400);
+  const identity = await resolveEffectiveUserId(c, c.req.query("userId") ?? undefined);
+  if (!identity.ok) return c.json({ error: identity.error }, identity.status);
   const store = getSessionStore();
-  await store.delete(c.req.param("id"), userId);
+  await store.delete(c.req.param("id"), identity.userId);
   return c.json({ ok: true });
 });
 
 // ── Bulk setup ──
 
 app.post("/api/setup", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
 
@@ -547,6 +609,9 @@ app.post("/api/setup", async (c) => {
 // ── Knowledge ──
 
 app.post("/api/knowledge", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const agent = body.agent ?? listAgents()[0] ?? "default";
@@ -555,18 +620,27 @@ app.post("/api/knowledge", async (c) => {
   return c.json(result.item, 201);
 });
 
-app.get("/api/knowledge", (c) => {
+app.get("/api/knowledge", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const agent = c.req.query("agent");
   return c.json({ items: listKnowledge(agent ?? undefined) });
 });
 
-app.get("/api/knowledge/:id", (c) => {
+app.get("/api/knowledge/:id", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const item = getKnowledge(c.req.param("id"));
   if (!item) return c.json({ error: "Not found" }, 404);
   return c.json(item);
 });
 
 app.put("/api/knowledge/:id", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const updated = updateKnowledge(c.req.param("id"), body);
@@ -574,7 +648,10 @@ app.put("/api/knowledge/:id", async (c) => {
   return c.json(updated);
 });
 
-app.delete("/api/knowledge/:id", (c) => {
+app.delete("/api/knowledge/:id", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   deleteKnowledge(c.req.param("id"));
   return c.json({ ok: true });
 });
@@ -582,6 +659,9 @@ app.delete("/api/knowledge/:id", (c) => {
 // ── Secrets ──
 
 app.post("/api/secrets", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const result = setSecret(body.key, body.value, body.expiresAt);
@@ -589,15 +669,24 @@ app.post("/api/secrets", async (c) => {
   return c.json({ ok: true, key: body.key }, 201);
 });
 
-app.get("/api/secrets", (c) => {
+app.get("/api/secrets", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   return c.json({ keys: listSecretKeys() });
 });
 
-app.get("/api/secrets/:key", (c) => {
+app.get("/api/secrets/:key", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   return c.json({ key: c.req.param("key"), exists: hasSecret(c.req.param("key")) });
 });
 
-app.delete("/api/secrets/:key", (c) => {
+app.delete("/api/secrets/:key", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   deleteSecret(c.req.param("key"));
   return c.json({ ok: true });
 });
@@ -605,6 +694,9 @@ app.delete("/api/secrets/:key", (c) => {
 // ── Tools ──
 
 app.post("/api/tools", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const agent = body.agent ?? listAgents()[0] ?? "default";
@@ -613,18 +705,27 @@ app.post("/api/tools", async (c) => {
   return c.json(result.tool, 201);
 });
 
-app.get("/api/tools", (c) => {
+app.get("/api/tools", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const agent = c.req.query("agent");
   return c.json({ tools: listTools(agent ?? undefined) });
 });
 
-app.get("/api/tools/:name", (c) => {
+app.get("/api/tools/:name", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const tool = getTool(c.req.param("name"));
   if (!tool) return c.json({ error: "Not found" }, 404);
   return c.json(tool);
 });
 
 app.put("/api/tools/:name", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const updated = updateTool(c.req.param("name"), body);
@@ -632,24 +733,36 @@ app.put("/api/tools/:name", async (c) => {
   return c.json(updated);
 });
 
-app.delete("/api/tools/:name", (c) => {
+app.delete("/api/tools/:name", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   deleteTool(c.req.param("name"));
   return c.json({ ok: true });
 });
 
 // ── Builtins ──
 
-app.get("/api/builtins", (c) => {
+app.get("/api/builtins", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   return c.json({ builtins: listBuiltins() });
 });
 
-app.post("/api/builtins/:name/enable", (c) => {
+app.post("/api/builtins/:name/enable", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const ok = enableBuiltin(c.req.param("name"));
   if (!ok) return c.json({ error: "Unknown builtin" }, 404);
   return c.json({ ok: true, name: c.req.param("name"), enabled: true });
 });
 
-app.post("/api/builtins/:name/disable", (c) => {
+app.post("/api/builtins/:name/disable", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
   const ok = disableBuiltin(c.req.param("name"));
   if (!ok) return c.json({ error: "Unknown builtin" }, 404);
   return c.json({ ok: true, name: c.req.param("name"), enabled: false });

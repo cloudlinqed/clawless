@@ -21,6 +21,17 @@ export const assistant = defineAgent({
 When tools are available, use them to accomplish the user's request.
 Think step by step about which tools to call and in what order.`,
 
+  // Optional: harden the public behavior of the agent.
+  // guardrails: {
+  //   domain: "shopping help for an online store",
+  //   outOfScopeMessage: "I can only help with shopping-related questions for this store.",
+  // },
+  //
+  // Optional: remove generic built-ins for domain-specific assistants.
+  // builtinPolicy: {
+  //   deny: ["fetch_page", "json_request", "web_search"],
+  // },
+
   tools: [
     // Add your tools here. Examples:
     //

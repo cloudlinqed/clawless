@@ -1,11 +1,11 @@
 import { defineTool, Type } from "../interface.js";
 import { runAgent } from "../../runtime/agent.js";
-import type { AgentRunResult } from "../../runtime/agent.js";
 import { getModel, getEnvApiKey } from "@mariozechner/pi-ai";
 import { buildSystemPrompt } from "../../config/knowledge.js";
 import { buildDynamicTools } from "../../config/tool-store.js";
 import { getEnabledBuiltins } from "./index.js";
 import { getAgent, getDefaultAgent } from "../../config/agent-def.js";
+import { deriveRequestContext, getRequestSlot, requireRequestContext, runWithRequestContext } from "../../runtime/request-context.js";
 
 /**
  * Sub-agent tracker. Stores results of spawned agents within a request
@@ -23,22 +23,15 @@ export interface SpawnedAgent {
   completedAt?: number;
 }
 
-const spawnedAgents = new Map<string, SpawnedAgent[]>();
+const SPAWNED_AGENTS_SLOT = "builtin:spawned_agents";
 
-let currentParentSessionKey = "default";
-let currentUserId = "default";
-
-export function setSpawnContext(sessionKey: string, userId: string): void {
-  currentParentSessionKey = sessionKey;
-  currentUserId = userId;
+export function getSpawnedAgents(): SpawnedAgent[] {
+  return getRequestSlot<SpawnedAgent[]>(SPAWNED_AGENTS_SLOT, () => []);
 }
 
-export function getSpawnedAgents(sessionKey: string): SpawnedAgent[] {
-  return spawnedAgents.get(sessionKey) ?? [];
-}
-
-export function clearSpawnedAgents(sessionKey: string): void {
-  spawnedAgents.delete(sessionKey);
+export function clearSpawnedAgents(): void {
+  const spawnedAgents = getSpawnedAgents();
+  spawnedAgents.length = 0;
 }
 
 export const sessionsSpawnTool = defineTool({
@@ -59,9 +52,10 @@ export const sessionsSpawnTool = defineTool({
     ),
   }),
   execute: async (params, signal) => {
+    const request = requireRequestContext();
     const agentDef = params.agentName
       ? getAgent(params.agentName)
-      : getDefaultAgent();
+      : (getAgent(request.agentName) ?? getDefaultAgent());
 
     if (!agentDef) {
       throw new Error(`Agent not found: ${params.agentName ?? "default"}`);
@@ -83,9 +77,8 @@ export const sessionsSpawnTool = defineTool({
     };
 
     // Track this spawn
-    const list = spawnedAgents.get(currentParentSessionKey) ?? [];
+    const list = getSpawnedAgents();
     list.push(entry);
-    spawnedAgents.set(currentParentSessionKey, list);
 
     try {
       // Collect all tools for the sub-agent (same as parent)
@@ -93,21 +86,24 @@ export const sessionsSpawnTool = defineTool({
         ...agentDef.tools,
         ...buildDynamicTools(agentDef.name),
         // Give sub-agent builtins but NOT sessions_spawn (prevent infinite recursion)
-        ...getEnabledBuiltins({ userId: currentUserId, sessionKey: spawnId })
+        ...getEnabledBuiltins()
           .filter((t) => t.name !== "sessions_spawn" && t.name !== "subagents"),
       ];
 
-      const result = await runAgent(params.task, {
-        model,
-        systemPrompt: buildSystemPrompt(
-          agentDef.instructions + "\n\nYou are a sub-agent handling a specific task. Be focused and concise.",
-          agentDef.name
-        ),
-        tools: allTools,
-        maxTurns: 5,
-        signal,
-        getApiKey: (p) => getEnvApiKey(p),
-      });
+      const result = await runWithRequestContext(
+        deriveRequestContext({ sessionKey: spawnId, agentName: agentDef.name }, { freshSlots: true }),
+        () => runAgent(params.task, {
+          model,
+          systemPrompt: buildSystemPrompt(
+            agentDef,
+            agentDef.instructions + "\n\nYou are a sub-agent handling a specific task. Be focused and concise."
+          ),
+          tools: allTools,
+          maxTurns: 5,
+          signal,
+          getApiKey: (p) => getEnvApiKey(p),
+        })
+      );
 
       entry.status = "completed";
       entry.result = result.result;

@@ -1,11 +1,5 @@
 import { defineTool, Type } from "../interface.js";
-
-/**
- * Per-session plan store. The agent uses this to show the user
- * its multi-step plan and update progress. Emitted as tool_end events
- * so the frontend can render progress UI (A2UI).
- */
-const planStore = new Map<string, PlanData>();
+import { getRequestSlot } from "../../runtime/request-context.js";
 
 interface PlanStep {
   id: string;
@@ -18,12 +12,7 @@ interface PlanData {
   steps: PlanStep[];
   notes?: string;
 }
-
-let currentSessionKey = "default";
-
-export function setPlanSessionKey(key: string): void {
-  currentSessionKey = key;
-}
+const REQUEST_PLAN_SLOT = "builtin:update_plan";
 
 export const updatePlanTool = defineTool({
   name: "update_plan",
@@ -54,7 +43,8 @@ export const updatePlanTool = defineTool({
     notes: Type.Optional(Type.String({ description: "Optional explanation or summary" })),
   }),
   execute: async (params) => {
-    let plan = planStore.get(currentSessionKey);
+    const state = getRequestSlot<{ plan: PlanData | null }>(REQUEST_PLAN_SLOT, () => ({ plan: null }));
+    let plan = state.plan;
 
     // Create or update plan
     if (params.title || params.steps) {
@@ -63,7 +53,7 @@ export const updatePlanTool = defineTool({
         steps: (params.steps as PlanStep[]) ?? plan?.steps ?? [],
         notes: params.notes ?? plan?.notes,
       };
-      planStore.set(currentSessionKey, plan);
+      state.plan = plan;
     }
 
     // Update a single step
