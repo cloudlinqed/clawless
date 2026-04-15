@@ -3,6 +3,8 @@ import { Hono } from "hono";
 import { requireAdminAccess, resolveEffectiveUserId } from "../src/auth/index.js";
 
 const ENV_KEYS = [
+  "NODE_ENV",
+  "CLAWLESS_MODE",
   "AUTH_REQUIRED",
   "AUTH_TRUSTED_USER_HEADER",
   "ADMIN_API_KEY",
@@ -74,6 +76,44 @@ describe("request auth identity resolution", () => {
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
       error: "Authentication is required",
+    });
+  });
+
+  it("requires authentication by default in production", async () => {
+    process.env.NODE_ENV = "production";
+
+    const app = new Hono();
+    app.get("/", async (c) => {
+      const identity = await resolveEffectiveUserId(c, c.req.query("userId") ?? undefined);
+      if (!identity.ok) {
+        return c.json({ error: identity.error }, identity.status);
+      }
+      return c.json({ userId: identity.userId });
+    });
+
+    const response = await app.request("http://local.test/?userId=user-1");
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "Authentication is required",
+    });
+  });
+
+  it("closes admin routes by default in production", async () => {
+    process.env.NODE_ENV = "production";
+
+    const app = new Hono();
+    app.get("/", async (c) => {
+      const admin = await requireAdminAccess(c);
+      if (!admin.ok) {
+        return c.json({ error: admin.error }, admin.status);
+      }
+      return c.json({ ok: true });
+    });
+
+    const response = await app.request("http://local.test/");
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "Admin access required",
     });
   });
 

@@ -1,5 +1,6 @@
 import { defineTool, Type } from "../interface.js";
 import { resolveSecretsInUrl } from "./resolve-secrets.js";
+import { assertBuiltinOutboundAllowed } from "../../security/outbound.js";
 
 export const fetchPageTool = defineTool({
   name: "fetch_page",
@@ -20,6 +21,7 @@ export const fetchPageTool = defineTool({
     // Resolve any secret key names in URL query params
     const url = new URL(params.url);
     resolveSecretsInUrl(url);
+    await assertBuiltinOutboundAllowed(url.toString());
 
     const response = await fetch(url.toString(), {
       signal,

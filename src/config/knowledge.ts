@@ -47,6 +47,7 @@ export interface SecretEntry {
 // ── Config ──
 
 const MAX_TOTAL_KNOWLEDGE_CHARS = Number(process.env.MAX_KNOWLEDGE_CHARS) || 100_000;
+const SECRET_ENV_PREFIX = process.env.SECRET_ENV_PREFIX ?? "CLAWLESS_SECRET_";
 
 // ── Storage interface ──
 
@@ -75,10 +76,7 @@ export async function loadFromPersistence(): Promise<void> {
     persistence.loadSecrets(),
   ]);
   for (const item of items) knowledgeStore.set(item.id, item);
-  for (const entry of secrets) {
-    secretsStore.set(entry.key, entry);
-    process.env[entry.key] = entry.value;
-  }
+  for (const entry of secrets) secretsStore.set(entry.key, entry);
 }
 
 async function persist(): Promise<void> {
@@ -182,32 +180,59 @@ export function setSecret(key: string, value: string, expiresAt?: number): { ok:
     return { ok: false, error: parsed.error.flatten().fieldErrors.toString() };
   }
   secretsStore.set(key, { key, value, expiresAt });
-  process.env[key] = value;
   persist();
   return { ok: true };
 }
 
 export function deleteSecret(key: string): void {
   secretsStore.delete(key);
-  delete process.env[key];
   persist();
 }
 
+function listPrefixedEnvSecretKeys(): string[] {
+  return Object.keys(process.env)
+    .filter((key) => key.startsWith(SECRET_ENV_PREFIX))
+    .map((key) => key.slice(SECRET_ENV_PREFIX.length))
+    .filter((key) => SecretSchema.shape.key.safeParse(key).success);
+}
+
 export function listSecretKeys(): Array<{ key: string; expiresAt?: number; expired: boolean }> {
-  return Array.from(secretsStore.values()).map((e) => ({
-    key: e.key,
-    expiresAt: e.expiresAt,
-    expired: isExpired(e),
-  }));
+  const entries = new Map<string, { key: string; expiresAt?: number; expired: boolean }>();
+
+  for (const e of secretsStore.values()) {
+    entries.set(e.key, {
+      key: e.key,
+      expiresAt: e.expiresAt,
+      expired: isExpired(e),
+    });
+  }
+
+  for (const key of listPrefixedEnvSecretKeys()) {
+    if (!entries.has(key)) {
+      entries.set(key, { key, expired: false });
+    }
+  }
+
+  return Array.from(entries.values());
+}
+
+export function getSecretValue(key: string): string | null {
+  const entry = secretsStore.get(key);
+  if (entry) {
+    if (isExpired(entry)) {
+      deleteSecret(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  const envKey = `${SECRET_ENV_PREFIX}${key}`;
+  const envValue = process.env[envKey];
+  return typeof envValue === "string" && envValue.length > 0 ? envValue : null;
 }
 
 export function hasSecret(key: string): boolean {
-  const entry = secretsStore.get(key);
-  if (entry && isExpired(entry)) {
-    deleteSecret(key);
-    return false;
-  }
-  return !!entry || !!process.env[key];
+  return getSecretValue(key) !== null;
 }
 
 /** Prune expired secrets. Call on interval or at startup. */

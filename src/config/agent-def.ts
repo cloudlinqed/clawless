@@ -38,6 +38,29 @@ export interface AgentGuardrails {
   hideInternalDetails?: boolean;
 }
 
+export interface AgentNetworkPolicy {
+  /**
+   * How generic builtin HTTP tools (`fetch_page`, `json_request`) may access the network.
+   *
+   * - `contextual` (default): only hosts already present in the agent's own tools,
+   *   configured knowledge URLs, and explicit allowHosts are reachable.
+   * - `open`: allow any public host, while still blocking localhost/private-network SSRF targets.
+   * - `disabled`: block builtin outbound HTTP entirely for this agent.
+   */
+  mode?: "contextual" | "open" | "disabled";
+
+  /**
+   * Additional hosts or wildcard suffixes allowed for builtin outbound HTTP.
+   * Examples: `api.example.com`, `*.example.com`
+   */
+  allowHosts?: string[];
+
+  /**
+   * Allow plain HTTP for builtin outbound requests. HTTPS is required by default.
+   */
+  allowHttp?: boolean;
+}
+
 /**
  * An agent definition — the equivalent of an OpenClaw agent config.
  *
@@ -60,6 +83,9 @@ export interface AgentDef {
 
   /** Runtime guardrails that constrain the agent's public behavior. */
   guardrails?: AgentGuardrails;
+
+  /** Runtime network policy for generic builtin HTTP tools. */
+  networkPolicy?: AgentNetworkPolicy;
 
   /** Default model override (e.g. "claude-sonnet-4-5") */
   model?: string;

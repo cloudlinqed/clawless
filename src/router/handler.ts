@@ -23,6 +23,7 @@ import {
 import { getSessionStore } from "../session/index.js";
 import type { SessionData } from "../session/store.js";
 import { createRequestContext, runWithRequestContext } from "../runtime/request-context.js";
+import { getOutOfScopeMessage, evaluatePromptScope } from "../security/scope.js";
 import { requireAdminAccess, resolveEffectiveUserId } from "../auth/index.js";
 import { AgentRequestSchema, type AgentRequestBody } from "./validation.js";
 
@@ -194,6 +195,29 @@ function resolveAgent(data: AgentRequestBody) {
   return agentDef;
 }
 
+async function enforceRequestScope(
+  prompt: string,
+  agentDef: AgentDef,
+  modelChain: Array<{ model: ReturnType<typeof getModel>; label: string }>,
+  signal?: AbortSignal
+): Promise<{ allowed: boolean; label: string }> {
+  let lastError: unknown;
+  let usedLabel = modelChain[0]?.label ?? "unknown";
+
+  for (const { model, label } of modelChain) {
+    usedLabel = label;
+    try {
+      const verdict = await evaluatePromptScope(prompt, agentDef, model, signal);
+      return { allowed: verdict.allowed, label };
+    } catch (err) {
+      lastError = err;
+      if (!shouldFallback(err, signal)) break;
+    }
+  }
+
+  throw lastError ?? new Error("Failed to evaluate request scope");
+}
+
 async function saveSession(
   currentKey: string, userId: string, agentName: string,
   messages: any[], existingSession: SessionData | null
@@ -357,6 +381,33 @@ app.post("/api/agent", async (c) => {
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    let scope: { allowed: boolean; label: string };
+    try {
+      scope = await enforceRequestScope(parsed.data.prompt, agentDef, modelChain, controller.signal);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (controller.signal.aborted) {
+        return c.json({ error: "Request timed out", details: message }, 504);
+      }
+      return c.json({ error: "Failed to evaluate request scope", details: message }, 500);
+    }
+
+    if (!scope.allowed) {
+      return c.json({
+        sessionKey: currentKey,
+        agent: agentDef.name,
+        model: scope.label,
+        result: getOutOfScopeMessage(agentDef),
+        toolCalls: [],
+        usage: {
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalTokens: 0,
+          turns: 0,
+        },
+      });
+    }
+
     let lastError: unknown;
     let usedModel = modelChain[0].label;
 
@@ -427,6 +478,59 @@ app.post("/api/agent/stream", async (c) => {
   const timeoutMs = Number(process.env.TIMEOUT_MS) || 120_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  let scope: { allowed: boolean; label: string };
+  try {
+    scope = await enforceRequestScope(parsed.data.prompt, agentDef, modelChain, controller.signal);
+  } catch (err) {
+    clearTimeout(timeout);
+    const message = err instanceof Error ? err.message : String(err);
+    if (controller.signal.aborted) {
+      return c.json({ error: "Request timed out", details: message }, 504);
+    }
+    return c.json({ error: "Failed to evaluate request scope", details: message }, 500);
+  }
+
+  if (!scope.allowed) {
+    const refusal = getOutOfScopeMessage(agentDef);
+    return streamSSE(c, async (stream) => {
+      try {
+        await stream.writeSSE({
+          event: "model_selected",
+          data: JSON.stringify({ model: scope.label }),
+        });
+        await stream.writeSSE({ event: "agent_start", data: "{}" });
+        await stream.writeSSE({
+          event: "turn_start",
+          data: JSON.stringify({ turn: 1 }),
+        });
+        await stream.writeSSE({
+          event: "text_done",
+          data: JSON.stringify({ text: refusal }),
+        });
+        await stream.writeSSE({
+          event: "turn_end",
+          data: JSON.stringify({ turn: 1 }),
+        });
+        await stream.writeSSE({
+          event: "agent_end",
+          data: JSON.stringify({
+            sessionKey: currentKey,
+            result: refusal,
+            toolCalls: [],
+            usage: {
+              totalInputTokens: 0,
+              totalOutputTokens: 0,
+              totalTokens: 0,
+              turns: 1,
+            },
+          }),
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    });
+  }
 
   return streamSSE(c, async (stream) => runWithRequestContext(requestContext, async () => {
     try {

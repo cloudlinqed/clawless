@@ -1,4 +1,4 @@
-import { listSecretKeys } from "../../config/knowledge.js";
+import { getSecretValue, listSecretKeys } from "../../config/knowledge.js";
 
 /**
  * Resolve secret references in a string value.
@@ -11,8 +11,9 @@ import { listSecretKeys } from "../../config/knowledge.js";
  */
 export function resolveSecretValue(value: string): string {
   // Check if the entire value is a known secret key name
-  if (process.env[value] && isSecretKey(value)) {
-    return process.env[value]!;
+  const resolved = getSecretValue(value);
+  if (resolved && isSecretKey(value)) {
+    return resolved;
   }
   return value;
 }
@@ -76,6 +77,5 @@ function isSecretKey(value: string): boolean {
   // Check registered secrets
   const keys = listSecretKeys();
   if (keys.some((k) => k.key === value)) return true;
-  // Check process.env
-  return !!process.env[value];
+  return false;
 }

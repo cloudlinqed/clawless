@@ -1,12 +1,9 @@
 import type { Context } from "hono";
 import type { RequestAuthContext } from "../runtime/request-context.js";
 import { verifyJwt } from "./jwt.js";
+import { envFlag, isDevelopmentMode, isProductionMode } from "../runtime/mode.js";
 
 const authCache = new WeakMap<Request, Promise<RequestAuthContext>>();
-
-function envFlag(value: string | undefined): boolean {
-  return value === "1" || value?.toLowerCase() === "true";
-}
 
 function getClaimValue(claims: Record<string, unknown>, path: string): unknown {
   const parts = path.split(".");
@@ -22,14 +19,23 @@ function getClaimValue(claims: Record<string, unknown>, path: string): unknown {
   return current;
 }
 
-function isAuthConfigured(): boolean {
+function hasConfiguredAuthProviders(): boolean {
   return Boolean(
-    process.env.ADMIN_API_KEY ||
     process.env.AUTH_TRUSTED_USER_HEADER ||
     process.env.AUTH_JWKS_URL ||
-    process.env.AUTH_JWT_SECRET ||
-    envFlag(process.env.AUTH_REQUIRED)
+    process.env.AUTH_JWT_SECRET
   );
+}
+
+function hasAdminAccessConfigured(): boolean {
+  return Boolean(process.env.ADMIN_API_KEY) || hasConfiguredAuthProviders();
+}
+
+function isAuthRequired(): boolean {
+  if (process.env.AUTH_REQUIRED !== undefined) {
+    return envFlag(process.env.AUTH_REQUIRED);
+  }
+  return isProductionMode();
 }
 
 function getAdminRoleValues(): string[] {
@@ -40,7 +46,7 @@ function getAdminRoleValues(): string[] {
 }
 
 async function resolveRequestAuth(c: Context): Promise<RequestAuthContext> {
-  const required = envFlag(process.env.AUTH_REQUIRED);
+  const required = isAuthRequired();
   const adminKeyHeader = process.env.ADMIN_API_KEY_HEADER ?? "x-clawless-admin-key";
   const adminKey = process.env.ADMIN_API_KEY;
   const suppliedAdminKey = c.req.header(adminKeyHeader);
@@ -120,7 +126,7 @@ export async function getRequestAuth(c: Context): Promise<RequestAuthContext> {
 export async function requireAdminAccess(
   c: Context
 ): Promise<{ ok: true; auth: RequestAuthContext } | { ok: false; status: 401 | 403; error: string }> {
-  if (!isAuthConfigured()) {
+  if (isDevelopmentMode() && !hasAdminAccessConfigured()) {
     return { ok: true, auth: { required: false, authenticated: false, isAdmin: true, source: "none" } };
   }
 
@@ -129,7 +135,7 @@ export async function requireAdminAccess(
     if (auth.isAdmin) {
       return { ok: true, auth };
     }
-    return { ok: false, status: auth.required ? 403 : 401, error: "Admin access required" };
+    return { ok: false, status: auth.authenticated ? 403 : 401, error: "Admin access required" };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, status: 401, error: message };

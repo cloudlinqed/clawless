@@ -32,6 +32,15 @@ export interface HttpToolConfig {
   paramLocation?: "query" | "body";
 }
 
+export type ClawlessHttpTool = {
+  __clawlessHttpConfig?: HttpToolConfig;
+};
+
+export function getHttpToolConfig(tool: unknown): HttpToolConfig | undefined {
+  if (typeof tool !== "object" || tool === null) return undefined;
+  return (tool as ClawlessHttpTool).__clawlessHttpConfig;
+}
+
 /**
  * Define a tool from an HTTP API endpoint.
  *
@@ -77,7 +86,7 @@ export function httpTool(config: HttpToolConfig) {
 
   const schema = Type.Object(schemaProps);
 
-  return defineTool({
+  const tool = defineTool({
     name: config.name,
     label: config.label ?? config.name,
     description: config.description,
@@ -141,4 +150,7 @@ export function httpTool(config: HttpToolConfig) {
       return JSON.stringify(data, null, 2);
     },
   });
+
+  ((tool as unknown) as ClawlessHttpTool).__clawlessHttpConfig = config;
+  return tool;
 }

@@ -4,6 +4,13 @@ OpenClaw's agent runtime extracted for serverless. Same Pi SDK agent brain, no G
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/clawless)
 
+Clawless is designed for developers who want:
+
+- a reusable AI backend they can drop behind an app
+- app-specific agents, not just a generic chatbot
+- durable sessions, memos, tools, knowledge, and secrets
+- secure defaults in production without a large setup burden
+
 ## Setup
 
 ```bash
@@ -25,7 +32,12 @@ Clawless can run in two modes:
 - Lightweight mode: no auth, in-memory sessions/memos, file-backed knowledge/tools/secrets.
 - Production mode: authenticated users plus Postgres-backed sessions, memos, knowledge, tools, and secrets.
 
-Production mode is enabled by environment variables:
+By default, Clawless behaves like this:
+
+- Development/test mode: no auth required unless you explicitly enable it.
+- Production mode (`NODE_ENV=production` or `CLAWLESS_MODE=production`): auth is required by default, and admin/config routes are closed by default.
+
+Production mode is configured by environment variables:
 
 ```bash
 # User auth
@@ -46,6 +58,19 @@ DATABASE_SSL=true
 
 When auth is enabled, `userId` is derived from the verified auth context by default. Normal users cannot impersonate other users by submitting a different `userId`.
 
+### Production Checklist
+
+For a real deployment, you should normally have all of the following:
+
+- `NODE_ENV=production` or `CLAWLESS_MODE=production`
+- `DATABASE_URL` pointing at Postgres/Supabase
+- either `AUTH_TRUSTED_USER_HEADER` behind a trusted app gateway or JWT/JWKS validation
+- `ADMIN_API_KEY` for setup/config routes
+- `CORS_ORIGIN` set to your real frontend origin
+- app-specific `guardrails` and `networkPolicy`
+
+Do not rely on file persistence for mutable production knowledge/secrets/tools on ephemeral hosts like Railway or Vercel unless you also attach durable storage.
+
 ## Defining agents
 
 Edit `clawless.config.ts` to define what your backend does. Each exported `defineAgent()` becomes an available agent.
@@ -61,8 +86,8 @@ export const myAgent = defineAgent({
     domain: "travel planning",
     outOfScopeMessage: "I can only help with travel planning requests.",
   },
-  builtinPolicy: {
-    deny: ["fetch_page", "json_request"],
+  networkPolicy: {
+    mode: "contextual",
   },
   tools: [
     httpTool({
@@ -83,7 +108,39 @@ export const myAgent = defineAgent({
 });
 ```
 
-The `instructions` field is natural language — tell the agent what it does, how it should behave, what to prioritize. The agent figures out when and how to call the tools. Use `guardrails` to keep the agent in-domain and prevent disclosure of backend internals. Use `builtinPolicy` to remove generic built-ins for product-specific assistants.
+The `instructions` field is natural language — tell the agent what it does, how it should behave, what to prioritize. The agent figures out when and how to call the tools. Use `guardrails` to keep the agent in-domain and prevent disclosure of backend internals. Use `networkPolicy` to constrain generic HTTP builtins, and `builtinPolicy` to remove them entirely when the product does not need them. Clawless also performs a server-side scope check before the full tool-using agent run, using the agent's instructions and `guardrails.domain` as the source of truth.
+
+`networkPolicy.mode: "contextual"` is the default. In that mode, `fetch_page` and `json_request` can only reach hosts already present in the agent's own configured HTTP tools, persisted dynamic tools, knowledge URLs, or explicit `allowHosts`. This keeps app backends usable without turning those builtins into unrestricted internet access.
+
+### Use The Right Layer
+
+The cleanest way to shape an agent is to put each kind of information in the right place:
+
+- `instructions`: the agent's role, tone, and priorities
+- `knowledge`: product facts, API docs, policies, workflows, allowed external docs, and decision rules
+- `tools`: the actual actions the agent is allowed to take
+- `secrets`: API keys and credentials only
+- `guardrails`: what the agent must refuse and what it must not disclose
+- `networkPolicy`: where generic builtin HTTP tools are allowed to connect
+
+If you put everything into `instructions`, the agent becomes hard to maintain. If you put secrets into `knowledge`, the agent becomes unsafe. If you rely on knowledge without guardrails and tools, the agent becomes hard to control.
+
+### Network Policy Modes
+
+`networkPolicy` applies to builtin outbound HTTP tools like `fetch_page` and `json_request`.
+
+- `contextual`:
+  Safe default. Only hosts already implied by the agent's own tools, persisted tools, knowledge URLs, or explicit `allowHosts` are reachable.
+- `open`:
+  For intentional open-web agents. Public internet hosts are allowed, but localhost/private-network SSRF targets are still blocked.
+- `disabled`:
+  Blocks builtin outbound HTTP entirely for that agent.
+
+Notes:
+
+- HTTPS is required by default. Plain HTTP is only allowed when `allowHttp: true`.
+- URLs found in knowledge can widen the contextual allowlist, so knowledge should stay intentional and product-specific.
+- `networkPolicy` affects builtin HTTP tools. Static/dynamic app-specific HTTP tools still work as configured.
 
 ### Recommended Hardening For Product-Specific Agents
 
@@ -92,6 +149,8 @@ If your backend powers a focused application, such as shopping, support, booking
 - Set `guardrails.domain` to the product scope the agent is allowed to serve.
 - Set `guardrails.outOfScopeMessage` to the refusal message users should see for unrelated questions.
 - Keep `guardrails.hideInternalDetails` enabled so users cannot query tools, models, prompts, providers, or backend configuration.
+- Keep `networkPolicy.mode` as `contextual` unless you are intentionally building an open-web agent.
+- Add `networkPolicy.allowHosts` only for extra public hosts the builtin HTTP tools should reach.
 - Use `builtinPolicy.allow` or `builtinPolicy.deny` to remove broad tools like `fetch_page`, `json_request`, and `web_search` unless the product truly needs them.
 - Prefer app-specific tools over general web access. For a shopping backend, expose catalog, inventory, pricing, recommendations, and checkout-adjacent tools instead of generic browsing tools.
 
@@ -106,8 +165,8 @@ export const shoppingAssistant = defineAgent({
     outOfScopeMessage: "I can only help with shopping-related questions for this store.",
     hideInternalDetails: true,
   },
-  builtinPolicy: {
-    deny: ["fetch_page", "json_request", "web_search"],
+  networkPolicy: {
+    mode: "contextual",
   },
   tools: [
     searchCatalogTool,
@@ -117,9 +176,58 @@ export const shoppingAssistant = defineAgent({
 });
 ```
 
+## Knowledge Guide
+
+Knowledge is agent-scoped prompt context. It is the main way to teach the agent about your app without changing code.
+
+Good uses for knowledge:
+
+- product catalog rules and business constraints
+- API usage notes and response conventions
+- refund, shipping, eligibility, or compliance policy
+- supported workflows and escalation rules
+- allowed external documentation or reference URLs
+
+Bad uses for knowledge:
+
+- secrets, API keys, bearer tokens, passwords
+- user-specific private data
+- giant document dumps that should really be a retrieval/indexing system
+
+Important behavior:
+
+- Knowledge is injected into the system prompt for that agent.
+- Knowledge is not a vector database or semantic search index.
+- Knowledge is not per-user; it is shared by the agent.
+- Total knowledge size is capped by `MAX_KNOWLEDGE_CHARS` (default `100000`).
+- In `contextual` network mode, URLs inside knowledge are treated as allowed outbound hosts for builtin HTTP tools.
+
+Rule of thumb:
+
+- If the agent should know something, put it in knowledge.
+- If the agent should be able to do something, make it a tool.
+- If the agent must never reveal or answer something, make it a guardrail.
+- If the agent needs a credential, store it as a secret.
+
+Example knowledge item:
+
+```json
+{
+  "agent": "shopping-assistant",
+  "title": "Store Shipping Policy",
+  "content": "Standard shipping takes 3-5 business days. We do not ship hazardous items internationally. Use https://docs.example.com/shipping for the latest internal shipping rules.",
+  "priority": 20
+}
+```
+
 ## Built-in tools
 
 Clawless ships with 14 built-in tools. Core tools are enabled by default. Tools that need external API keys are disabled until you enable them.
+
+Important:
+
+- `fetch_page` and `json_request` are enabled by default, but their outbound access is still constrained by each agent's `networkPolicy`.
+- The Builtins API changes global builtin enablement. Agent-level `builtinPolicy` still filters what each agent can actually use.
 
 ### Core (enabled by default)
 
@@ -162,6 +270,8 @@ All endpoints are under `/api`. Default port is `3000`.
 ### POST /api/agent
 
 Run the agent with a prompt. Returns the full result when complete.
+
+If the prompt is out of scope for the selected agent, Clawless may refuse it before the full agent run starts and return the configured out-of-scope message with no tool calls.
 
 **Request:**
 
@@ -248,6 +358,7 @@ Bulk configure tools, knowledge, secrets, and builtins in a single call.
   "tools": [
     {
       "name": "search_items",
+      "agent": "my-agent",
       "description": "Search for items",
       "url": "https://api.example.com/search",
       "parameters": {
@@ -258,6 +369,7 @@ Bulk configure tools, knowledge, secrets, and builtins in a single call.
   ],
   "knowledge": [
     {
+      "agent": "my-agent",
       "title": "API Documentation",
       "content": "## How to use the search API\n...",
       "priority": 10
@@ -266,6 +378,12 @@ Bulk configure tools, knowledge, secrets, and builtins in a single call.
   "builtins": ["web_search", "image_analyze"]
 }
 ```
+
+Notes:
+
+- If `agent` is omitted on tools or knowledge, Clawless assigns them to the first configured agent.
+- `builtins` in `/api/setup` enable those builtins globally, not per-agent.
+- Setup/config routes require admin access by default in production.
 
 ### Tools API
 
@@ -279,7 +397,7 @@ Register HTTP API tools the agent can call at runtime.
 | `PUT` | `/api/tools/:name` | Update |
 | `DELETE` | `/api/tools/:name` | Delete |
 
-When auth/admin protection is enabled, the setup/config endpoints (`/api/setup`, `/api/tools`, `/api/knowledge`, `/api/secrets`, `/api/builtins`, `/api/providers`, `/api/capabilities`) require admin access.
+In production, the setup/config endpoints (`/api/setup`, `/api/tools`, `/api/knowledge`, `/api/secrets`, `/api/builtins`, `/api/providers`, `/api/capabilities`) require admin access by default. In local development, they stay open unless you configure auth/admin credentials.
 
 ### Knowledge API
 
@@ -292,6 +410,8 @@ Teach the agent about APIs, tools, and workflows.
 | `GET` | `/api/knowledge/:id` | Get one |
 | `PUT` | `/api/knowledge/:id` | Update |
 | `DELETE` | `/api/knowledge/:id` | Delete |
+
+Knowledge is the right place for role-specific facts and instructions, but not for secrets. Treat it as shared agent context, not user memory.
 
 ### Secrets API
 
@@ -309,7 +429,7 @@ Provide API keys and credentials at runtime.
 When the agent uses `json_request` or `fetch_page`, it may reference secret key names in URLs, headers, or body values (e.g. `api_key=SCRAPINGDOG_API_KEY`). Clawless automatically resolves these to real values **server-side** before making the HTTP call.
 
 - The agent writes the key name (from its knowledge), not the actual secret
-- The tool replaces `UPPER_SNAKE_CASE` values that match registered secrets or env vars
+- The tool replaces `UPPER_SNAKE_CASE` values that match registered secrets or safely-prefixed env vars like `CLAWLESS_SECRET_SCRAPINGDOG_API_KEY`
 - The real key **never** reaches the frontend — SSE events show the key name, not the value
 - Works in URL query params, headers (including `Bearer TOKEN_NAME`), and request body
 
@@ -319,7 +439,7 @@ Server resolves internally:  ...api_key=69230d...  (never sent to client)
 Frontend sees (tool_end):    result = "[product data]"
 ```
 
-No extra configuration needed — if the secret is registered via `/api/secrets`, resolution is automatic.
+No extra configuration needed — if the secret is registered via `/api/secrets`, resolution is automatic. If you prefer env vars, expose them with the safe prefix (`CLAWLESS_SECRET_<KEY>` by default) instead of relying on arbitrary process env access.
 
 ### Builtins API
 
@@ -331,9 +451,11 @@ Enable or disable built-in tools.
 | `POST` | `/api/builtins/:name/enable` | Enable a builtin |
 | `POST` | `/api/builtins/:name/disable` | Disable a builtin |
 
+These toggles are global runtime switches. Per-agent restrictions still come from `builtinPolicy`.
+
 ### Sessions API
 
-All session endpoints require `?userId=` query parameter.
+Session endpoints require `?userId=` in unauthenticated/dev usage. In authenticated production usage, the backend derives the effective user identity from auth, and admin callers may still provide an explicit `userId`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -486,6 +608,8 @@ GET /api/providers/anthropic/models
 
 The frontend can use these endpoints to let users pick their provider and model during setup.
 
+In production, these provider-discovery routes are admin-only by default.
+
 ## Supported providers
 
 Any provider supported by the Pi SDK. Set `DEFAULT_PROVIDER` and `DEFAULT_MODEL` in `.env`, plus the matching API key.
@@ -546,7 +670,8 @@ Format: `"provider/model"` for cross-provider, or just `"model"` to use the same
 | `DEFAULT_PROVIDER` | Yes | `openai` | AI provider (see supported providers) |
 | `DEFAULT_MODEL` | Yes | — | Model ID (e.g. `gpt-4o`, `claude-sonnet-4-5`) |
 | `DEFAULT_FALLBACK_MODELS` | No | — | Comma-separated fallbacks (e.g. `anthropic/claude-sonnet-4-5,gpt-4o-mini`) |
-| `AUTH_REQUIRED` | No | `false` | Require authenticated user identity for user routes |
+| `CLAWLESS_MODE` | No | auto | Explicit runtime mode: `development` / `production` |
+| `AUTH_REQUIRED` | No | auto | Require authenticated user identity for user routes. Defaults to `true` in production and `false` in dev/test |
 | `AUTH_TRUSTED_USER_HEADER` | No | — | Trusted upstream header carrying the authenticated user id |
 | `AUTH_JWT_SECRET` | No | — | HMAC secret for HS256 bearer token verification |
 | `AUTH_JWKS_URL` | No | — | JWKS URL for RS256 bearer token verification (works with Supabase Auth) |
@@ -570,6 +695,8 @@ Format: `"provider/model"` for cross-provider, or just `"model"` to use the same
 | `TIMEOUT_MS` | No | `120000` | Request timeout in ms |
 | `MAX_KNOWLEDGE_CHARS` | No | `100000` | Max total knowledge size |
 | `DATA_DIR` | No | `.clawless` | Persisted data directory when using file mode |
+| `SECRET_ENV_PREFIX` | No | `CLAWLESS_SECRET_` | Prefix for safely-exposed env-backed secrets |
+| `OUTBOUND_ALLOWED_HOSTS` | No | — | Global allowlist for builtin outbound HTTP hosts (`api.example.com,*.example.com`) |
 | `VISION_PROVIDER` | No | inherit | Provider for image_analyze |
 | `VISION_MODEL` | No | `gpt-4o` | Model for image_analyze |
 | `IMAGE_MODEL` | No | `dall-e-3` | Model for image_generate |
@@ -585,6 +712,9 @@ Format: `"provider/model"` for cross-provider, or just `"model"` to use the same
 2. Railway runs `npm run build` then `npm start` automatically
 3. Set environment variables in the Railway dashboard
 4. Set `CORS_ORIGIN` to your frontend URL
+5. For durable knowledge/tools/secrets/sessions/memos, set `DATABASE_URL` to Postgres/Supabase
+
+If you redeploy on an ephemeral filesystem without Postgres, file-backed knowledge/tools/secrets may be lost and sessions/memos will not survive restarts.
 
 **Vercel:**
 ```bash

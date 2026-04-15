@@ -22,6 +22,8 @@ When tools are available, use them to accomplish the user's request.
 Think step by step about which tools to call and in what order.`,
 
   // Optional: harden the public behavior of the agent.
+  // The backend now enforces scope server-side as well, using your
+  // instructions/domain as the classifier target before the full agent run.
   // guardrails: {
   //   domain: "shopping help for an online store",
   //   outOfScopeMessage: "I can only help with shopping-related questions for this store.",
@@ -30,6 +32,13 @@ Think step by step about which tools to call and in what order.`,
   // Optional: remove generic built-ins for domain-specific assistants.
   // builtinPolicy: {
   //   deny: ["fetch_page", "json_request", "web_search"],
+  // },
+  //
+  // Optional: keep generic networked builtins constrained to this agent's own
+  // tool hosts / knowledge URLs by default, or explicitly allow more hosts.
+  // networkPolicy: {
+  //   mode: "contextual", // default
+  //   allowHosts: ["api.example.com", "*.examplecdn.com"],
   // },
 
   tools: [

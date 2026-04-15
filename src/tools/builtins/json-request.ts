@@ -4,6 +4,7 @@ import {
   resolveSecretsInHeaders,
   resolveSecretsInBody,
 } from "./resolve-secrets.js";
+import { assertBuiltinOutboundAllowed } from "../../security/outbound.js";
 
 export const jsonRequestTool = defineTool({
   name: "json_request",
@@ -63,6 +64,7 @@ export const jsonRequestTool = defineTool({
       }
     }
 
+    await assertBuiltinOutboundAllowed(url.toString());
     const response = await fetch(url.toString(), { method, headers, body, signal });
 
     const contentType = response.headers.get("content-type") ?? "";
