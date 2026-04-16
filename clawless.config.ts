@@ -40,6 +40,32 @@ Think step by step about which tools to call and in what order.`,
   //   mode: "contextual", // default
   //   allowHosts: ["api.example.com", "*.examplecdn.com"],
   // },
+  //
+  // Optional: expose structured UI output for this agent.
+  // Clawless will auto-inject a generated `present_output` tool when enabled.
+  // outputSchema: {
+  //   mode: "required",
+  //   allowedBlocks: ["cards", "actions", "citations"],
+  //   preferredBlocks: ["cards", "actions"],
+  //   requiredBlocks: ["cards", "actions"],
+  //   requireCitations: true,
+  //   onInvalid: "reject",
+  //   instructions: "Use cards for product results and actions for next steps.",
+  // },
+  //
+  // Optional: use indexed retrieval or plug in external RAG sources.
+  // `indexed` injects only retrieved context for the current request.
+  // `hybrid` combines retrieval with the full static knowledge section.
+  // retrieval: {
+  //   mode: "indexed",
+  //   topK: 5,
+  //   maxChars: 5000,
+  //   sources: [
+  //     { type: "knowledge", chunkSize: 1200, chunkOverlap: 200 },
+  //     { type: "retriever", name: "catalog_rag", topK: 3 },
+  //   ],
+  //   instructions: "Prefer retrieved catalog and policy context over general product knowledge.",
+  // },
 
   tools: [
     // Add your tools here. Examples:

@@ -3,6 +3,11 @@ import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { streamSimple, getEnvApiKey } from "@mariozechner/pi-ai";
 import type { Message, AssistantMessage, AssistantMessageEvent } from "@mariozechner/pi-ai";
 import type { AgentRunConfig, ToolCallRecord } from "./types.js";
+import { adaptToolResultToOutput } from "../output/tool-result-adapter.js";
+import { finalizeStructuredOutput } from "../output/postprocess.js";
+import { parseStructuredOutputResult } from "../output/tool.js";
+import type { StructuredOutput } from "../output/schema.js";
+import type { RetrievedDocument } from "../retrieval/registry.js";
 
 /**
  * SSE event types emitted during agent execution.
@@ -10,14 +15,16 @@ import type { AgentRunConfig, ToolCallRecord } from "./types.js";
  */
 export type SSEEvent =
   | { event: "agent_start" }
+  | { event: "retrieval_ready"; data: { documents: RetrievedDocument[] } }
   | { event: "turn_start"; data: { turn: number } }
   | { event: "text_delta"; data: { delta: string } }
   | { event: "text_done"; data: { text: string } }
+  | { event: "output_ready"; data: { output: StructuredOutput } }
   | { event: "tool_start"; data: { toolCallId: string; toolName: string; args: unknown } }
   | { event: "tool_update"; data: { toolCallId: string; toolName: string; partialResult: unknown } }
-  | { event: "tool_end"; data: { toolCallId: string; toolName: string; result: unknown; isError: boolean } }
+  | { event: "tool_end"; data: { toolCallId: string; toolName: string; result: unknown; ui: StructuredOutput | null; isError: boolean } }
   | { event: "turn_end"; data: { turn: number } }
-  | { event: "agent_end"; data: { sessionKey: string; result: string; toolCalls: ToolCallRecord[]; usage: { totalInputTokens: number; totalOutputTokens: number; totalTokens: number; turns: number } } }
+  | { event: "agent_end"; data: { sessionKey: string; result: string; output: StructuredOutput | null; retrieval?: RetrievedDocument[]; toolCalls: ToolCallRecord[]; usage: { totalInputTokens: number; totalOutputTokens: number; totalTokens: number; turns: number } } }
   | { event: "error"; data: { message: string } };
 
 /**
@@ -35,34 +42,9 @@ export async function* runAgentStream(
   let turnCount = 0;
   const maxTurns = config.maxTurns ?? 10;
   let lastAssistantText = "";
-
-  const agent = new Agent({
-    streamFn: streamSimple,
-    getApiKey: config.getApiKey ?? ((provider) => getEnvApiKey(provider)),
-    toolExecution: "parallel",
-    afterToolCall: async (ctx) => {
-      const resultText = ctx.result.content
-        .filter((c): c is { type: "text"; text: string } => c.type === "text")
-        .map((c) => c.text)
-        .join("");
-
-      toolCalls.push({
-        name: ctx.toolCall.name,
-        args: ctx.args as Record<string, unknown>,
-        result: resultText,
-        isError: ctx.isError,
-      });
-      return undefined;
-    },
-  });
-
-  agent.state.model = config.model;
-  agent.state.systemPrompt = config.systemPrompt;
-  agent.state.tools = config.tools;
-
-  if (config.messages && config.messages.length > 0) {
-    agent.state.messages = [...config.messages];
-  }
+  let structuredOutput: StructuredOutput | null = null;
+  const toolByName = new Map(config.tools.map((tool) => [tool.name, tool]));
+  const toolUiById = new Map<string, StructuredOutput | null>();
 
   // Event queue — agent events are pushed here, yielded by the generator
   const eventQueue: SSEEvent[] = [];
@@ -76,6 +58,52 @@ export async function* runAgentStream(
       resolveWait = undefined;
       r();
     }
+  }
+
+  const agent = new Agent({
+    streamFn: streamSimple,
+    getApiKey: config.getApiKey ?? ((provider) => getEnvApiKey(provider)),
+    toolExecution: "parallel",
+    afterToolCall: async (ctx) => {
+      const resultText = ctx.result.content
+        .filter((c): c is { type: "text"; text: string } => c.type === "text")
+        .map((c) => c.text)
+        .join("");
+      const tool = toolByName.get(ctx.toolCall.name);
+      const ui = adaptToolResultToOutput({
+        toolName: ctx.toolCall.name,
+        toolLabel: tool?.label,
+        args: ctx.args as Record<string, unknown>,
+        resultText,
+        isError: ctx.isError,
+      });
+      toolUiById.set(ctx.toolCall.id, ui);
+
+      toolCalls.push({
+        name: ctx.toolCall.name,
+        args: ctx.args as Record<string, unknown>,
+        result: resultText,
+        ui,
+        isError: ctx.isError,
+      });
+
+      if (!ctx.isError && ctx.toolCall.name === "present_output") {
+        const parsed = parseStructuredOutputResult(resultText, config.outputSchema);
+        if (parsed) {
+          structuredOutput = parsed;
+          push({ event: "output_ready", data: { output: parsed } });
+        }
+      }
+      return undefined;
+    },
+  });
+
+  agent.state.model = config.model;
+  agent.state.systemPrompt = config.systemPrompt;
+  agent.state.tools = config.tools;
+
+  if (config.messages && config.messages.length > 0) {
+    agent.state.messages = [...config.messages];
   }
 
   const unsubscribe = agent.subscribe((event: AgentEvent) => {
@@ -129,7 +157,13 @@ export async function* runAgentStream(
       case "tool_execution_end":
         push({
           event: "tool_end",
-          data: { toolCallId: event.toolCallId, toolName: event.toolName, result: event.result, isError: event.isError },
+          data: {
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            result: event.result,
+            ui: toolUiById.get(event.toolCallId) ?? null,
+            isError: event.isError,
+          },
         });
         break;
 
@@ -163,11 +197,30 @@ export async function* runAgentStream(
       // Emit final summary
       const allMessages = agent.state.messages;
       const usage = accumulateUsage(allMessages);
+      const previousOutputSignature = structuredOutput ? JSON.stringify(structuredOutput) : null;
+      try {
+        const finalized = await finalizeStructuredOutput(config.model, {
+          prompt,
+          result: lastAssistantText,
+          currentOutput: structuredOutput,
+          toolCalls,
+        }, config.outputSchema, config.signal);
+        structuredOutput = finalized.output;
+
+        if (structuredOutput && JSON.stringify(structuredOutput) !== previousOutputSignature) {
+          push({ event: "output_ready", data: { output: structuredOutput } });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        push({ event: "error", data: { message } });
+      }
+
       push({
         event: "agent_end",
         data: {
           sessionKey: config.sessionId,
           result: lastAssistantText,
+          output: structuredOutput,
           toolCalls,
           usage: { ...usage, turns: turnCount },
         },

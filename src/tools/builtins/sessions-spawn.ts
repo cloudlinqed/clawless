@@ -6,6 +6,8 @@ import { buildDynamicTools } from "../../config/tool-store.js";
 import { getEnabledBuiltins } from "./index.js";
 import { getAgent, getDefaultAgent } from "../../config/agent-def.js";
 import { deriveRequestContext, getRequestSlot, requireRequestContext, runWithRequestContext } from "../../runtime/request-context.js";
+import { buildStructuredOutputTool } from "../../output/tool.js";
+import { retrieveAgentContext } from "../../retrieval/index.js";
 
 /**
  * Sub-agent tracker. Stores results of spawned agents within a request
@@ -81,9 +83,12 @@ export const sessionsSpawnTool = defineTool({
     list.push(entry);
 
     try {
+      const retrievedContext = await retrieveAgentContext(params.task, agentDef, signal);
+
       // Collect all tools for the sub-agent (same as parent)
       const allTools = [
         ...agentDef.tools,
+        ...[buildStructuredOutputTool(agentDef)].filter((tool): tool is NonNullable<typeof tool> => tool !== null),
         ...buildDynamicTools(agentDef.name),
         // Give sub-agent builtins but NOT sessions_spawn (prevent infinite recursion)
         ...getEnabledBuiltins()
@@ -96,9 +101,11 @@ export const sessionsSpawnTool = defineTool({
           model,
           systemPrompt: buildSystemPrompt(
             agentDef,
-            agentDef.instructions + "\n\nYou are a sub-agent handling a specific task. Be focused and concise."
+            agentDef.instructions + "\n\nYou are a sub-agent handling a specific task. Be focused and concise.",
+            { retrievedContext }
           ),
           tools: allTools,
+          outputSchema: agentDef.outputSchema,
           maxTurns: 5,
           signal,
           getApiKey: (p) => getEnvApiKey(p),

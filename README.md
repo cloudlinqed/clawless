@@ -9,6 +9,7 @@ Clawless is designed for developers who want:
 - a reusable AI backend they can drop behind an app
 - app-specific agents, not just a generic chatbot
 - durable sessions, memos, tools, knowledge, and secrets
+- indexed retrieval and pluggable RAG sources for larger knowledge sets
 - secure defaults in production without a large setup burden
 
 ## Setup
@@ -89,6 +90,23 @@ export const myAgent = defineAgent({
   networkPolicy: {
     mode: "contextual",
   },
+  outputSchema: {
+    mode: "required",
+    allowedBlocks: ["timeline", "actions", "citations"],
+    preferredBlocks: ["timeline", "actions"],
+    requiredBlocks: ["timeline", "actions"],
+    requireCitations: true,
+    onInvalid: "reject",
+    instructions: "Use a timeline for itineraries and actions for booking next steps.",
+  },
+  retrieval: {
+    mode: "indexed",
+    topK: 4,
+    sources: [
+      { type: "knowledge", chunkSize: 1200, chunkOverlap: 200 },
+    ],
+    instructions: "Use retrieved fare rules and destination notes before relying on general travel knowledge.",
+  },
   tools: [
     httpTool({
       name: "search_flights",
@@ -112,6 +130,12 @@ The `instructions` field is natural language — tell the agent what it does, ho
 
 `networkPolicy.mode: "contextual"` is the default. In that mode, `fetch_page` and `json_request` can only reach hosts already present in the agent's own configured HTTP tools, persisted dynamic tools, knowledge URLs, or explicit `allowHosts`. This keeps app backends usable without turning those builtins into unrestricted internet access.
 
+If `outputSchema` is enabled, Clawless auto-injects a generated `present_output` tool for that agent. The agent can use it to emit structured UI payloads such as cards, tables, timelines, forms, filters, actions, and citations. Those blocks are returned separately from the final text response so clients do not have to reverse-engineer UI state from markdown.
+
+Clawless also adapts raw tool results into canonical UI objects before returning them. Each `toolCalls[]` entry in `/api/agent` and each streamed `tool_end` event can include `ui`, which uses the same structured block model as final `output`. This lets clients render tables, cards, citations, forms, filters, actions, and timelines directly from tool results without depending on prompt wording.
+
+If `retrieval` is enabled, Clawless resolves request-specific context before the model call. The default source is an indexed chunk search over the agent's knowledge items, and you can also register custom retrievers for external RAG backends. This keeps large knowledge sets from being injected wholesale on every request.
+
 ### Use The Right Layer
 
 The cleanest way to shape an agent is to put each kind of information in the right place:
@@ -122,8 +146,57 @@ The cleanest way to shape an agent is to put each kind of information in the rig
 - `secrets`: API keys and credentials only
 - `guardrails`: what the agent must refuse and what it must not disclose
 - `networkPolicy`: where generic builtin HTTP tools are allowed to connect
+- `retrieval`: how the agent pulls request-specific context from indexed knowledge or pluggable RAG sources
 
 If you put everything into `instructions`, the agent becomes hard to maintain. If you put secrets into `knowledge`, the agent becomes unsafe. If you rely on knowledge without guardrails and tools, the agent becomes hard to control.
+
+### Retrieval
+
+Use `retrieval` when the agent should search a larger knowledge base or an external RAG system instead of injecting all knowledge into every prompt.
+
+How it works:
+
+- `off`: keep the current static knowledge injection behavior
+- `indexed`: inject only retrieved documents for this request
+- `hybrid`: inject both retrieved documents and the full static knowledge section
+
+Built-in source:
+
+- `{ type: "knowledge" }`: chunk and rank the agent's knowledge items with a local text index
+
+Pluggable source:
+
+- `{ type: "retriever", name: "catalog_rag" }`: call a custom retriever you registered in code
+
+Example:
+
+```ts
+import { defineAgent, registerRetriever } from "clawless";
+
+registerRetriever({
+  name: "catalog_rag",
+  description: "Search the external catalog/vector backend",
+  retrieve: async ({ query, topK }) => {
+    return searchCatalogVectors(query, topK);
+  },
+});
+
+export const shoppingAssistant = defineAgent({
+  name: "shopping-assistant",
+  instructions: "You help customers compare products and explain store policy.",
+  retrieval: {
+    mode: "hybrid",
+    topK: 5,
+    maxChars: 5000,
+    sources: [
+      { type: "knowledge" },
+      { type: "retriever", name: "catalog_rag", topK: 3 },
+    ],
+    instructions: "Prefer retrieved catalog context and policy excerpts over general product knowledge.",
+  },
+  tools: [searchCatalogTool],
+});
+```
 
 ### Network Policy Modes
 
@@ -141,6 +214,55 @@ Notes:
 - HTTPS is required by default. Plain HTTP is only allowed when `allowHttp: true`.
 - URLs found in knowledge can widen the contextual allowlist, so knowledge should stay intentional and product-specific.
 - `networkPolicy` affects builtin HTTP tools. Static/dynamic app-specific HTTP tools still work as configured.
+
+### Structured Output
+
+Use `outputSchema` when you want a frontend-ready response model instead of relying only on free text and raw tool traces.
+
+Supported block types:
+
+- `markdown`
+- `cards`
+- `table`
+- `timeline`
+- `form`
+- `filters`
+- `actions`
+- `citations`
+
+Example:
+
+```ts
+export const shoppingAssistant = defineAgent({
+  name: "shopping-assistant",
+  instructions: "You help customers browse products and compare options.",
+  outputSchema: {
+    mode: "required",
+    allowedBlocks: ["cards", "filters", "actions", "citations"],
+    preferredBlocks: ["cards", "actions"],
+    requiredBlocks: ["cards", "actions"],
+    requireCitations: true,
+    onInvalid: "reject",
+    instructions: "Use cards for products, filters for narrowing choices, and actions for next steps.",
+  },
+  tools: [searchCatalogTool],
+});
+```
+
+How it works:
+
+- `auto`: expose structured output support and let the agent use it when helpful
+- `required`: always try to produce structured output; if the main agent does not emit it directly, Clawless runs a formatter fallback
+- `off`: disable structured output for that agent
+
+The per-agent schema can also:
+
+- restrict which block types are allowed
+- require specific block types via `requiredBlocks`
+- require citations
+- repair invalid output or reject the request via `onInvalid`
+
+If `onInvalid: "reject"` and Clawless still cannot satisfy the contract after salvage/repair, `/api/agent` returns `422` instead of silently returning the wrong shape.
 
 ### Recommended Hardening For Product-Specific Agents
 
@@ -168,6 +290,14 @@ export const shoppingAssistant = defineAgent({
   networkPolicy: {
     mode: "contextual",
   },
+  outputSchema: {
+    mode: "required",
+    allowedBlocks: ["cards", "actions", "citations"],
+    preferredBlocks: ["cards", "actions"],
+    requiredBlocks: ["cards", "actions"],
+    requireCitations: true,
+    onInvalid: "reject",
+  },
   tools: [
     searchCatalogTool,
     getProductDetailsTool,
@@ -178,7 +308,7 @@ export const shoppingAssistant = defineAgent({
 
 ## Knowledge Guide
 
-Knowledge is agent-scoped prompt context. It is the main way to teach the agent about your app without changing code.
+Knowledge is agent-scoped context. By default it is injected into the prompt, and when `retrieval` is enabled it can also be chunked and searched as an indexed source.
 
 Good uses for knowledge:
 
@@ -192,12 +322,12 @@ Bad uses for knowledge:
 
 - secrets, API keys, bearer tokens, passwords
 - user-specific private data
-- giant document dumps that should really be a retrieval/indexing system
+- giant document dumps without enabling retrieval or an external RAG source
 
 Important behavior:
 
-- Knowledge is injected into the system prompt for that agent.
-- Knowledge is not a vector database or semantic search index.
+- Knowledge is injected into the system prompt when `retrieval.mode` is `off` or `hybrid`.
+- Knowledge can also act as an indexed retrieval source when `retrieval.mode` is `indexed` or `hybrid`.
 - Knowledge is not per-user; it is shared by the agent.
 - Total knowledge size is capped by `MAX_KNOWLEDGE_CHARS` (default `100000`).
 - In `contextual` network mode, URLs inside knowledge are treated as allowed outbound hosts for builtin HTTP tools.
@@ -305,11 +435,61 @@ If the prompt is out of scope for the selected agent, Clawless may refuse it bef
   "sessionKey": "550e8400-e29b-41d4-a716-446655440000",
   "agent": "my-agent",
   "result": "Here are the best flight options...",
+  "output": {
+    "version": 1,
+    "summary": "3 itinerary options found",
+    "blocks": [
+      {
+        "type": "timeline",
+        "title": "Recommended Itinerary",
+        "items": [
+          {
+            "title": "Depart JFK",
+            "time": "2026-07-15 09:30",
+            "description": "Non-stop to NRT"
+          }
+        ]
+      },
+      {
+        "type": "actions",
+        "actions": [
+          { "id": "book-now", "label": "Book This Trip", "kind": "primary" }
+        ]
+      }
+    ]
+  },
+  "retrieval": [
+    {
+      "id": "policy-returns#0",
+      "title": "Baggage Policy",
+      "content": "Carry-on bags are included on all direct flights in this fare family...",
+      "score": 2.184,
+      "sourceType": "knowledge",
+      "sourceName": "knowledge_index",
+      "url": "https://docs.example.com/baggage"
+    }
+  ],
   "toolCalls": [
     {
       "name": "search_flights",
       "args": { "origin": "JFK", "destination": "NRT", "date": "2026-07-15" },
       "result": "{...}",
+      "ui": {
+        "version": 1,
+        "blocks": [
+          {
+            "type": "table",
+            "title": "Search Flights",
+            "columns": [
+              { "key": "airline", "label": "Airline" },
+              { "key": "price", "label": "Price" }
+            ],
+            "rows": [
+              { "airline": "Example Air", "price": "$842" }
+            ]
+          }
+        ]
+      },
       "isError": false
     }
   ],
@@ -333,22 +513,24 @@ Same request as `/api/agent`, returns Server-Sent Events (SSE) for real-time str
 | `model_selected` | `{ model }` | Which model is being used |
 | `model_fallback` | `{ failed, reason }` | Primary failed, trying next model |
 | `agent_start` | `{}` | Agent begins processing |
+| `retrieval_ready` | `{ documents }` | Retrieved context is ready for this request |
 | `turn_start` | `{ turn }` | New LLM turn begins |
 | `text_delta` | `{ delta }` | Incremental text token |
 | `text_done` | `{ text }` | Full completed assistant message |
+| `output_ready` | `{ output }` | Structured output is ready to render |
 | `tool_start` | `{ toolCallId, toolName, args }` | Tool execution begins |
-| `tool_end` | `{ toolCallId, toolName, result, isError }` | Tool execution finished |
+| `tool_end` | `{ toolCallId, toolName, result, ui, isError }` | Tool execution finished |
 | `turn_end` | `{ turn }` | LLM turn complete |
-| `agent_end` | `{ sessionKey, result, toolCalls, usage }` | Agent finished |
+| `agent_end` | `{ sessionKey, result, output, retrieval, toolCalls, usage }` | Agent finished |
 | `error` | `{ message }` | Something went wrong |
 
 ### A2UI (Agent-to-UI)
 
-The SSE events provide all the data needed for A2UI rendering. The `update_plan` tool emits step-by-step progress via `tool_end`. `text_delta` streams text token by token. `tool_start` / `tool_end` give full tool lifecycle. The frontend decides how to render.
+The SSE events provide all the data needed for A2UI rendering. `retrieval_ready` surfaces the indexed/pluggable RAG context chosen for the request. The `update_plan` tool emits step-by-step progress via `tool_end`. `text_delta` streams text token by token. `output_ready` delivers structured UI blocks for the final answer. `tool_end.ui` delivers canonical UI blocks for intermediate tool results. The frontend decides how to render.
 
 ### POST /api/setup
 
-Bulk configure tools, knowledge, secrets, and builtins in a single call.
+Bulk configure tools, knowledge, secrets, and builtins in a single call. Runtime-managed agents, tools, and knowledge now write to the target environment's `draft` snapshot by default.
 
 ```json
 {
@@ -383,7 +565,31 @@ Notes:
 
 - If `agent` is omitted on tools or knowledge, Clawless assigns them to the first configured agent.
 - `builtins` in `/api/setup` enable those builtins globally, not per-agent.
+- Add `"environment": "staging"` to target a non-default config environment.
+- Add `"publish": true` to publish the current draft immediately after setup.
 - Setup/config routes require admin access by default in production.
+
+### Draft / Publish / Promotion
+
+Clawless now supports release management for runtime-configured agents, tools, and knowledge:
+
+- `draft`: mutable workspace for an environment
+- `published`: immutable release snapshot used by production by default
+- `rollback`: publish a new release from an older version
+- `promotion`: copy a published release from one environment to another
+
+Default behavior:
+
+- development/test runtime reads `draft`
+- production runtime reads `published`
+- override with `CONFIG_STAGE=draft|published`
+
+Each environment is separate. Typical flow:
+
+1. Write changes to `staging` draft through `/api/agents`, `/api/tools`, `/api/knowledge`, or `/api/setup`.
+2. `POST /api/config/publish` for `staging`.
+3. Validate on the staging deployment.
+4. `POST /api/config/promote` into `production`, optionally with `"publish": true`.
 
 ### Tools API
 
@@ -391,13 +597,13 @@ Register HTTP API tools the agent can call at runtime.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/tools` | Register a tool |
-| `GET` | `/api/tools` | List all (optional `?agent=name`) |
-| `GET` | `/api/tools/:name` | Get one |
-| `PUT` | `/api/tools/:name` | Update |
-| `DELETE` | `/api/tools/:name` | Delete |
+| `POST` | `/api/tools` | Register a tool in draft (optional `environment`) |
+| `GET` | `/api/tools` | List all (optional `?agent=name&environment=staging&stage=draft`) |
+| `GET` | `/api/tools/:name` | Get one (optional `?environment=staging&stage=published`) |
+| `PUT` | `/api/tools/:name` | Update a draft tool |
+| `DELETE` | `/api/tools/:name` | Delete a draft tool |
 
-In production, the setup/config endpoints (`/api/setup`, `/api/tools`, `/api/knowledge`, `/api/secrets`, `/api/builtins`, `/api/providers`, `/api/capabilities`) require admin access by default. In local development, they stay open unless you configure auth/admin credentials.
+In production, the setup/config endpoints (`/api/setup`, `/api/agents`, `/api/tools`, `/api/knowledge`, `/api/secrets`, `/api/builtins`, `/api/config`, `/api/providers`, `/api/capabilities`) require admin access by default. In local development, they stay open unless you configure auth/admin credentials.
 
 ### Knowledge API
 
@@ -405,13 +611,58 @@ Teach the agent about APIs, tools, and workflows.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/knowledge` | Add knowledge |
-| `GET` | `/api/knowledge` | List all (optional `?agent=name`) |
-| `GET` | `/api/knowledge/:id` | Get one |
-| `PUT` | `/api/knowledge/:id` | Update |
-| `DELETE` | `/api/knowledge/:id` | Delete |
+| `POST` | `/api/knowledge` | Add knowledge in draft (optional `environment`) |
+| `GET` | `/api/knowledge` | List all (optional `?agent=name&environment=staging&stage=draft`) |
+| `GET` | `/api/knowledge/:id` | Get one (optional `?environment=staging&stage=published`) |
+| `PUT` | `/api/knowledge/:id` | Update draft knowledge |
+| `DELETE` | `/api/knowledge/:id` | Delete draft knowledge |
 
 Knowledge is the right place for role-specific facts and instructions, but not for secrets. Treat it as shared agent context, not user memory.
+
+### Agent Config API
+
+Runtime-managed agent definitions are versioned too. These endpoints manage the serializable parts of an agent: instructions, guardrails, builtinPolicy, networkPolicy, outputSchema, and model defaults. Code-defined tools still come from the repo.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/agents` | Create or replace a draft agent config |
+| `GET` | `/api/agents` | List agent configs (optional `?environment=staging&stage=draft`) |
+| `GET` | `/api/agents/:name` | Get one agent config |
+| `PUT` | `/api/agents/:name` | Update a draft agent config |
+| `DELETE` | `/api/agents/:name` | Delete a draft agent config |
+
+This API also supports `retrieval`, so runtime-managed agents can switch between static knowledge injection, indexed knowledge retrieval, and custom named retrievers without a code redeploy.
+
+### Config Lifecycle API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/config` | Current lifecycle status and known environments |
+| `GET` | `/api/config/releases` | List published releases for an environment |
+| `POST` | `/api/config/publish` | Publish the current draft for an environment |
+| `POST` | `/api/config/rollback` | Publish a new release from an older release id/version |
+| `POST` | `/api/config/promote` | Copy a published release to another environment, optionally publish it |
+
+Example publish:
+
+```json
+{
+  "environment": "staging",
+  "note": "Spring catalog rollout"
+}
+```
+
+Example promote:
+
+```json
+{
+  "sourceEnvironment": "staging",
+  "targetEnvironment": "production",
+  "releaseId": "replace-with-release-id",
+  "publish": true,
+  "note": "Promote approved staging release"
+}
+```
 
 ### Secrets API
 
@@ -440,6 +691,14 @@ Frontend sees (tool_end):    result = "[product data]"
 ```
 
 No extra configuration needed — if the secret is registered via `/api/secrets`, resolution is automatic. If you prefer env vars, expose them with the safe prefix (`CLAWLESS_SECRET_<KEY>` by default) instead of relying on arbitrary process env access.
+
+### Retrievers API
+
+List code-registered custom retrievers.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/retrievers` | List named retrievers available to agent `retrieval.sources` |
 
 ### Builtins API
 
@@ -475,18 +734,48 @@ GET /api/capabilities?agent=assistant
 
 ```json
 {
+  "environment": "production",
+  "stage": "published",
   "agent": "assistant",
   "tools": [
     { "name": "fetch_page", "source": "builtin", "enabled": true, "description": "..." },
+    { "name": "present_output", "source": "generated", "description": "..." },
     { "name": "my_api", "source": "dynamic", "description": "...", "url": "https://..." },
     { "name": "search_flights", "source": "config", "description": "..." }
+  ],
+  "outputSchema": {
+    "mode": "required",
+    "allowedBlocks": ["cards", "actions", "citations"],
+    "preferredBlocks": ["cards", "actions"],
+    "requiredBlocks": ["cards", "actions"],
+    "requireCitations": true,
+    "onInvalid": "reject"
+  },
+  "retrieval": {
+    "mode": "indexed",
+    "topK": 5,
+    "maxChars": 5000,
+    "sources": [
+      { "type": "knowledge" },
+      { "type": "retriever", "name": "catalog_rag", "topK": 3 }
+    ]
+  },
+  "retrievers": [
+    { "name": "catalog_rag", "description": "Search the external catalog/vector backend" }
   ],
   "knowledge": [
     { "id": "abc", "title": "API Docs", "priority": 10, "contentLength": 1200 }
   ],
   "secrets": [
     { "key": "MY_API_KEY", "expired": false }
-  ]
+  ],
+  "config": {
+    "environment": "production",
+    "stage": "published",
+    "draftUpdatedAt": 1712345678901,
+    "published": { "id": "rel_123", "version": 3, "publishedAt": 1712345678901, "note": "Spring rollout" },
+    "releaseCount": 3
+  }
 }
 ```
 
@@ -496,6 +785,7 @@ GET /api/capabilities?agent=assistant
 |--------|----------|-------------|
 | `GET` | `/api/health` | Health check |
 | `GET` | `/api/capabilities` | Full view of tools, knowledge, secrets (optional `?agent=name`) |
+| `GET` | `/api/retrievers` | List registered custom retrievers |
 
 ## Multi-turn conversations
 
@@ -686,6 +976,8 @@ Format: `"provider/model"` for cross-provider, or just `"model"` to use the same
 | `DATABASE_URL` | No | — | Postgres connection string. Enables durable Postgres mode automatically |
 | `DATABASE_SSL` | No | auto | Force SSL for Postgres connections |
 | `DATABASE_TABLE_PREFIX` | No | `clawless` | Prefix for all Clawless Postgres tables |
+| `CONFIG_ENV` | No | `development` or `production` | Config environment name for this deployment |
+| `CONFIG_STAGE` | No | auto | Which snapshot this deployment serves: `draft` or `published` |
 | `OPENAI_API_KEY` | * | — | API key for OpenAI |
 | `ANTHROPIC_API_KEY` | * | — | API key for Anthropic |
 | `GEMINI_API_KEY` | * | — | API key for Google Gemini |

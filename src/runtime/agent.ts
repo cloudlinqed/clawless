@@ -3,10 +3,15 @@ import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { streamSimple, getEnvApiKey } from "@mariozechner/pi-ai";
 import type { Message, AssistantMessage } from "@mariozechner/pi-ai";
 import type { AgentRunConfig, ToolCallRecord, UsageSummary } from "./types.js";
+import { adaptToolResultToOutput } from "../output/tool-result-adapter.js";
+import { finalizeStructuredOutput } from "../output/postprocess.js";
+import { parseStructuredOutputResult } from "../output/tool.js";
+import type { StructuredOutput } from "../output/schema.js";
 
 export interface AgentRunResult {
   messages: AgentMessage[];
   result: string;
+  output: StructuredOutput | null;
   toolCalls: ToolCallRecord[];
   usage: UsageSummary;
 }
@@ -26,8 +31,10 @@ export async function runAgent(
   config: AgentRunConfig
 ): Promise<AgentRunResult> {
   const toolCalls: ToolCallRecord[] = [];
+  let structuredOutput: StructuredOutput | null = null;
   let turnCount = 0;
   const maxTurns = config.maxTurns ?? 10;
+  const toolByName = new Map(config.tools.map((tool) => [tool.name, tool]));
 
   const agent = new Agent({
     streamFn: streamSimple,
@@ -38,13 +45,26 @@ export async function runAgent(
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
         .map((c) => c.text)
         .join("");
+      const tool = toolByName.get(ctx.toolCall.name);
+      const ui = adaptToolResultToOutput({
+        toolName: ctx.toolCall.name,
+        toolLabel: tool?.label,
+        args: ctx.args as Record<string, unknown>,
+        resultText,
+        isError: ctx.isError,
+      });
 
       toolCalls.push({
         name: ctx.toolCall.name,
         args: ctx.args as Record<string, unknown>,
         result: resultText,
+        ui,
         isError: ctx.isError,
       });
+
+      if (!ctx.isError && ctx.toolCall.name === "present_output") {
+        structuredOutput = parseStructuredOutputResult(resultText, config.outputSchema);
+      }
       return undefined;
     },
   });
@@ -85,10 +105,18 @@ export async function runAgent(
   const allMessages = agent.state.messages;
   const result = extractFinalText(allMessages);
   const usage = accumulateUsage(allMessages);
+  const finalized = await finalizeStructuredOutput(config.model, {
+    prompt,
+    result,
+    currentOutput: structuredOutput,
+    toolCalls,
+  }, config.outputSchema, config.signal);
+  const output = finalized.output;
 
   return {
     messages: allMessages,
     result,
+    output,
     toolCalls,
     usage: { ...usage, turns: turnCount },
   };

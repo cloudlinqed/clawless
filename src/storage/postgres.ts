@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import type { ConfigDraft, ConfigLifecyclePersistence, ConfigRelease } from "../config/lifecycle.js";
 import type { KnowledgeItem, KnowledgePersistence, SecretEntry } from "../config/knowledge.js";
 import type { StoredToolConfig, ToolPersistence } from "../config/tool-store.js";
 import type { SessionData, SessionStore } from "../session/store.js";
@@ -21,7 +22,7 @@ function getConnectionString(): string {
   return value;
 }
 
-export class PostgresPersistence implements KnowledgePersistence, ToolPersistence, SessionStore, MemoStore {
+export class PostgresPersistence implements KnowledgePersistence, ToolPersistence, ConfigLifecyclePersistence, SessionStore, MemoStore {
   private pool: Pool;
   private initPromise: Promise<void> | null = null;
   private tablePrefix: string;
@@ -75,6 +76,28 @@ export class PostgresPersistence implements KnowledgePersistence, ToolPersistenc
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS ${this.table("config_drafts")} (
+        environment TEXT PRIMARY KEY,
+        snapshot JSONB NOT NULL,
+        updated_at BIGINT NOT NULL,
+        base_release_id TEXT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS ${this.table("config_releases")} (
+        id TEXT PRIMARY KEY,
+        environment TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        snapshot JSONB NOT NULL,
+        created_at BIGINT NOT NULL,
+        published_at BIGINT NOT NULL,
+        note TEXT NULL,
+        source_release_id TEXT NULL,
+        source_environment TEXT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS ${this.table("config_releases")}_env_version_idx
+      ON ${this.table("config_releases")} (environment, version);
 
       CREATE TABLE IF NOT EXISTS ${this.table("sessions")} (
         id TEXT NOT NULL,
@@ -214,6 +237,105 @@ export class PostgresPersistence implements KnowledgePersistence, ToolPersistenc
             VALUES ($1, $2, $3::jsonb, $4, $5)
           `,
           [tool.name, tool.agent, JSON.stringify(tool), tool.createdAt, tool.updatedAt]
+        );
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async loadConfigDrafts(): Promise<ConfigDraft[]> {
+    await this.ensureReady();
+    const result = await this.pool.query(`
+      SELECT environment, snapshot, updated_at, base_release_id
+      FROM ${this.table("config_drafts")}
+      ORDER BY environment ASC
+    `);
+
+    return result.rows.map((row: any) => ({
+      environment: String(row.environment),
+      snapshot: row.snapshot as ConfigDraft["snapshot"],
+      updatedAt: Number(row.updated_at),
+      baseReleaseId: row.base_release_id === null ? undefined : String(row.base_release_id),
+    }));
+  }
+
+  async saveConfigDrafts(drafts: ConfigDraft[]): Promise<void> {
+    await this.ensureReady();
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      await client.query(`DELETE FROM ${this.table("config_drafts")}`);
+      for (const draft of drafts) {
+        await client.query(
+          `
+            INSERT INTO ${this.table("config_drafts")}
+              (environment, snapshot, updated_at, base_release_id)
+            VALUES ($1, $2::jsonb, $3, $4)
+          `,
+          [draft.environment, JSON.stringify(draft.snapshot), draft.updatedAt, draft.baseReleaseId ?? null]
+        );
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async loadConfigReleases(): Promise<ConfigRelease[]> {
+    await this.ensureReady();
+    const result = await this.pool.query(`
+      SELECT id, environment, version, snapshot, created_at, published_at, note, source_release_id, source_environment
+      FROM ${this.table("config_releases")}
+      ORDER BY environment ASC, version ASC
+    `);
+
+    return result.rows.map((row: any) => ({
+      id: String(row.id),
+      environment: String(row.environment),
+      version: Number(row.version),
+      snapshot: row.snapshot as ConfigRelease["snapshot"],
+      createdAt: Number(row.created_at),
+      publishedAt: Number(row.published_at),
+      note: row.note === null ? undefined : String(row.note),
+      sourceReleaseId: row.source_release_id === null ? undefined : String(row.source_release_id),
+      sourceEnvironment: row.source_environment === null ? undefined : String(row.source_environment),
+    }));
+  }
+
+  async saveConfigReleases(entries: ConfigRelease[]): Promise<void> {
+    await this.ensureReady();
+    const client = await this.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      await client.query(`DELETE FROM ${this.table("config_releases")}`);
+      for (const entry of entries) {
+        await client.query(
+          `
+            INSERT INTO ${this.table("config_releases")}
+              (id, environment, version, snapshot, created_at, published_at, note, source_release_id, source_environment)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)
+          `,
+          [
+            entry.id,
+            entry.environment,
+            entry.version,
+            JSON.stringify(entry.snapshot),
+            entry.createdAt,
+            entry.publishedAt,
+            entry.note ?? null,
+            entry.sourceReleaseId ?? null,
+            entry.sourceEnvironment ?? null,
+          ]
         );
       }
       await client.query("COMMIT");

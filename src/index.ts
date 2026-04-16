@@ -10,9 +10,58 @@ export type { ClawlessRequest, ClawlessResponse, AgentRunConfig } from "./runtim
 export { initializeClawless } from "./bootstrap.js";
 
 // Agent config
-export { defineAgent, registerAgent, getAgent, getDefaultAgent, listAgents } from "./config/agent-def.js";
-export type { AgentDef, AgentBuiltinPolicy, AgentGuardrails } from "./config/agent-def.js";
+export {
+  defineAgent,
+  registerAgent,
+  getAgent,
+  getAgentFor,
+  getDefaultAgent,
+  getDefaultAgentFor,
+  listAgents,
+  listRuntimeAgentConfigs,
+  listRuntimeAgentConfigsFor,
+  getRuntimeAgentConfig,
+  upsertRuntimeAgentConfig,
+  deleteRuntimeAgentConfigFor,
+} from "./config/agent-def.js";
+export type {
+  AgentDef,
+  AgentBuiltinPolicy,
+  AgentGuardrails,
+  AgentNetworkPolicy,
+  AgentOutputBlockType,
+  AgentOutputSchema,
+  AgentRetrievalConfig,
+  AgentRetrievalSource,
+  AgentRetrievalSourceKnowledge,
+  AgentRetrievalSourceRetriever,
+} from "./config/agent-def.js";
+export {
+  RuntimeAgentConfigSchema,
+  mergeAgentConfig,
+} from "./config/runtime-agent-config.js";
+export type { RuntimeAgentConfig } from "./config/runtime-agent-config.js";
 export { loadConfig } from "./config/loader.js";
+
+// Config lifecycle
+export {
+  getRuntimeConfigEnvironment,
+  getRuntimeConfigStage,
+  getConfigSnapshot,
+  getConfigStatus,
+  listConfigEnvironments,
+  listConfigReleases,
+  getConfigRelease,
+  publishDraft,
+  rollbackConfig,
+  promoteConfig,
+} from "./config/lifecycle.js";
+export type {
+  ConfigStage,
+  ConfigSnapshot,
+  ConfigDraft,
+  ConfigRelease,
+} from "./config/lifecycle.js";
 
 // Knowledge & secrets
 export {
@@ -47,3 +96,36 @@ export type { MemoStore, MemoEntry } from "./memo/store.js";
 
 // HTTP
 export { app } from "./router/handler.js";
+
+// Structured output
+export type {
+  StructuredOutput,
+  StructuredOutputBlock,
+  OutputAction,
+  OutputCitation,
+} from "./output/schema.js";
+export { adaptToolResultToOutput } from "./output/tool-result-adapter.js";
+export type { ToolResultAdapterInput } from "./output/tool-result-adapter.js";
+export {
+  finalizeStructuredOutput,
+  validateOutputContract,
+  StructuredOutputContractError,
+} from "./output/postprocess.js";
+export type { StructuredOutputPostprocessInput, StructuredOutputPostprocessResult } from "./output/postprocess.js";
+
+// Retrieval
+export {
+  retrieveAgentContext,
+  getRetrievalMode,
+  shouldInjectStaticKnowledge,
+} from "./retrieval/index.js";
+export {
+  registerRetriever,
+  getRetriever,
+  listRetrievers,
+} from "./retrieval/registry.js";
+export type {
+  Retriever,
+  RetrieverRequest,
+  RetrievedDocument,
+} from "./retrieval/registry.js";

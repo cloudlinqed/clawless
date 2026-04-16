@@ -1,6 +1,8 @@
 import { loadConfig } from "./config/loader.js";
-import { setPersistence, loadFromPersistence } from "./config/knowledge.js";
-import { setToolPersistence, loadToolsFromPersistence } from "./config/tool-store.js";
+import { exportBaseRuntimeAgentConfigs } from "./config/agent-def.js";
+import { initializeConfigLifecycle, setConfigLifecyclePersistence } from "./config/lifecycle.js";
+import { setPersistence, loadFromPersistence, exportBaseKnowledgeSnapshot } from "./config/knowledge.js";
+import { setToolPersistence, loadToolsFromPersistence, exportBaseToolSnapshot } from "./config/tool-store.js";
 import { FilePersistence } from "./config/knowledge-persistence.js";
 import { setSessionStore } from "./session/index.js";
 import { MemorySessionStore } from "./session/memory.js";
@@ -32,20 +34,32 @@ export async function initializeClawless(): Promise<void> {
 
       setPersistence(persistence);
       setToolPersistence(persistence);
+      setConfigLifecyclePersistence(persistence);
       setSessionStore(persistence);
       setMemoStore(persistence);
 
       await Promise.all([loadFromPersistence(), loadToolsFromPersistence()]);
+      await initializeConfigLifecycle({
+        agents: exportBaseRuntimeAgentConfigs(),
+        knowledge: exportBaseKnowledgeSnapshot(),
+        tools: exportBaseToolSnapshot(),
+      });
       return;
     }
 
     const filePersistence = new FilePersistence();
     setPersistence(filePersistence);
     setToolPersistence(filePersistence);
+    setConfigLifecyclePersistence(filePersistence);
     setSessionStore(new MemorySessionStore());
     setMemoStore(new MemoryMemoStore());
 
     await Promise.all([loadFromPersistence(), loadToolsFromPersistence()]);
+    await initializeConfigLifecycle({
+      agents: exportBaseRuntimeAgentConfigs(),
+      knowledge: exportBaseKnowledgeSnapshot(),
+      tools: exportBaseToolSnapshot(),
+    });
   })();
 
   await initPromise;

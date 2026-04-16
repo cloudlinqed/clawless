@@ -1,5 +1,20 @@
 import { z } from "zod";
 import type { AgentDef } from "./agent-def.js";
+import {
+  getConfigSnapshot,
+  isConfigLifecycleEnabled,
+  mutateDraftSnapshot,
+  type ConfigStage,
+} from "./lifecycle.js";
+import {
+  describeAllowedBlocks,
+  describePreferredBlocks,
+  describeRequiredBlocks,
+  getOutputSchemaMode,
+  isStructuredOutputEnabled,
+} from "../output/schema.js";
+import { getRetrievalMode, shouldInjectStaticKnowledge } from "../retrieval/index.js";
+import type { RetrievedDocument } from "../retrieval/registry.js";
 
 // ── Schemas ──
 
@@ -98,7 +113,8 @@ function totalKnowledgeChars(exclude?: string): number {
 }
 
 export function addKnowledge(
-  input: z.infer<typeof KnowledgeCreateSchema>
+  input: z.infer<typeof KnowledgeCreateSchema>,
+  options?: { environment?: string }
 ): { ok: true; item: KnowledgeItem } | { ok: false; error: string } {
   const parsed = KnowledgeCreateSchema.safeParse(input);
   if (!parsed.success) {
@@ -108,8 +124,7 @@ export function addKnowledge(
   const data = parsed.data;
   const id = data.id ?? crypto.randomUUID();
 
-  // Size guard
-  const currentChars = totalKnowledgeChars(id);
+  const currentChars = totalKnowledgeCharsInCollection(getKnowledgeCollection({ environment: options?.environment, stage: "draft" }), id);
   if (currentChars + data.content.length > MAX_TOTAL_KNOWLEDGE_CHARS) {
     return {
       ok: false,
@@ -118,52 +133,88 @@ export function addKnowledge(
   }
 
   const now = Date.now();
+  const existing = getKnowledge(id, { environment: options?.environment, stage: "draft" });
   const item: KnowledgeItem = {
     id,
     agent: data.agent,
     title: data.title,
     content: data.content,
     priority: data.priority,
-    createdAt: knowledgeStore.get(id)?.createdAt ?? now,
+    createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
-  knowledgeStore.set(id, item);
-  persist();
+  if (isConfigLifecycleEnabled()) {
+    mutateDraftSnapshot(options?.environment, (snapshot) => {
+      const snapshotExisting = snapshot.knowledge.find((entry) => entry.id === id);
+      snapshot.knowledge = snapshot.knowledge
+        .filter((entry) => entry.id !== id)
+        .concat({
+          ...item,
+          createdAt: snapshotExisting?.createdAt ?? item.createdAt,
+        });
+    });
+  } else {
+    knowledgeStore.set(id, item);
+    persist();
+  }
   return { ok: true, item };
 }
 
 export function updateKnowledge(
   id: string,
-  updates: Partial<Pick<KnowledgeItem, "title" | "content" | "priority">>
+  updates: Partial<Pick<KnowledgeItem, "title" | "content" | "priority">>,
+  options?: { environment?: string }
 ): KnowledgeItem | null {
-  const existing = knowledgeStore.get(id);
+  const existing = getKnowledge(id, { environment: options?.environment, stage: "draft" });
   if (!existing) return null;
 
   if (updates.content !== undefined) {
-    const currentChars = totalKnowledgeChars(id);
+    const currentChars = totalKnowledgeCharsInCollection(getKnowledgeCollection({ environment: options?.environment, stage: "draft" }), id);
     if (currentChars + updates.content.length > MAX_TOTAL_KNOWLEDGE_CHARS) {
       return null;
     }
   }
 
   const updated = { ...existing, ...updates, updatedAt: Date.now() };
-  knowledgeStore.set(id, updated);
-  persist();
+  if (isConfigLifecycleEnabled()) {
+    mutateDraftSnapshot(options?.environment, (snapshot) => {
+      snapshot.knowledge = snapshot.knowledge
+        .filter((entry) => entry.id !== id)
+        .concat(updated);
+    });
+  } else {
+    knowledgeStore.set(id, updated);
+    persist();
+  }
   return updated;
 }
 
-export function deleteKnowledge(id: string): boolean {
+export function deleteKnowledge(id: string, options?: { environment?: string }): boolean {
+  if (isConfigLifecycleEnabled()) {
+    return mutateDraftSnapshot(options?.environment, (snapshot) => {
+      const before = snapshot.knowledge.length;
+      snapshot.knowledge = snapshot.knowledge.filter((entry) => entry.id !== id);
+      return snapshot.knowledge.length !== before;
+    });
+  }
+
   const deleted = knowledgeStore.delete(id);
   if (deleted) persist();
   return deleted;
 }
 
-export function getKnowledge(id: string): KnowledgeItem | null {
-  return knowledgeStore.get(id) ?? null;
+export function getKnowledge(
+  id: string,
+  options?: { environment?: string; stage?: ConfigStage }
+): KnowledgeItem | null {
+  return getKnowledgeCollection(options).find((item) => item.id === id) ?? null;
 }
 
-export function listKnowledge(agent?: string): KnowledgeItem[] {
-  const items = Array.from(knowledgeStore.values());
+export function listKnowledge(
+  agent?: string,
+  options?: { environment?: string; stage?: ConfigStage }
+): KnowledgeItem[] {
+  const items = getKnowledgeCollection(options);
   const filtered = agent ? items.filter((k) => k.agent === agent) : items;
   return filtered.sort((a, b) => a.priority - b.priority);
 }
@@ -249,7 +300,7 @@ export function pruneExpiredSecrets(): number {
 
 // ── Bulk setup ──
 
-export function bulkSetup(input: z.infer<typeof BulkSetupSchema>): {
+export function bulkSetup(input: z.infer<typeof BulkSetupSchema>, options?: { environment?: string }): {
   knowledge: Array<{ id: string; ok: boolean; error?: string }>;
   secrets: Array<{ key: string; ok: boolean; error?: string }>;
 } {
@@ -264,7 +315,7 @@ export function bulkSetup(input: z.infer<typeof BulkSetupSchema>): {
   };
 
   for (const item of parsed.data.knowledge ?? []) {
-    const result = addKnowledge(item);
+    const result = addKnowledge(item, options);
     if (result.ok) {
       results.knowledge.push({ id: result.item.id, ok: true });
     } else {
@@ -324,9 +375,77 @@ function buildGuardrailSection(agentDef: Pick<AgentDef, "guardrails">): string {
   return `# Non-Negotiable Guardrails\n\n${rules.map((rule) => `- ${rule}`).join("\n")}`;
 }
 
+function buildOutputSection(agentDef: Pick<AgentDef, "outputSchema">): string {
+  if (!isStructuredOutputEnabled(agentDef.outputSchema)) {
+    return "";
+  }
+
+  const schema = agentDef.outputSchema!;
+  const rules = [
+    "When your answer would benefit from structured UI, call the `present_output` tool to build the final UI payload.",
+    `Allowed structured block types: ${describeAllowedBlocks(schema)}.`,
+    "The API returns the structured payload separately from your final text response, so keep your final text concise and consistent with that payload.",
+  ];
+
+  const preferred = describePreferredBlocks(schema);
+  if (preferred) {
+    rules.push(`Prefer these block types when appropriate: ${preferred}.`);
+  }
+
+  const required = describeRequiredBlocks(schema);
+  if (required) {
+    rules.push(`Your structured output must include these block types: ${required}.`);
+  }
+
+  if (schema.requireCitations) {
+    rules.push("Include citations in the structured output for externally sourced or factual claims.");
+  }
+
+  if (schema.instructions) {
+    rules.push(`Additional structured output rules: ${schema.instructions}`);
+  }
+
+  if (getOutputSchemaMode(schema) === "required") {
+    rules.push("This agent is expected to produce structured output on every substantive answer.");
+  }
+
+  return `# Structured Output\n\n${rules.map((rule) => `- ${rule}`).join("\n")}`;
+}
+
+function buildRetrievalSection(
+  agentDef: Pick<AgentDef, "retrieval">,
+  retrievedContext?: RetrievedDocument[]
+): string {
+  const mode = getRetrievalMode(agentDef.retrieval);
+  if (mode === "off" || !retrievedContext || retrievedContext.length === 0) {
+    return "";
+  }
+
+  const rules = [
+    "Use the following retrieved context when answering this request. Treat it as the most relevant domain context available for this turn.",
+    "Prefer retrieved context over general model knowledge when they overlap. If the retrieved context is insufficient, rely on allowed tools or refuse according to your guardrails rather than inventing details.",
+  ];
+
+  if (agentDef.retrieval?.instructions) {
+    rules.push(agentDef.retrieval.instructions);
+  }
+
+  const documents = retrievedContext
+    .map((doc, index) => {
+      const source = [`${doc.sourceType}:${doc.sourceName}`, doc.url ? `url=${doc.url}` : undefined]
+        .filter(Boolean)
+        .join(" | ");
+      return `## ${index + 1}. ${doc.title}\n\nScore: ${doc.score}\nSource: ${source}\n\n${doc.content}`;
+    })
+    .join("\n\n---\n\n");
+
+  return `# Retrieved Context\n\n${rules.map((rule) => `- ${rule}`).join("\n")}\n\n${documents}`;
+}
+
 export function buildSystemPrompt(
-  agentDef: Pick<AgentDef, "name" | "instructions" | "guardrails">,
-  baseInstructions = agentDef.instructions
+  agentDef: Pick<AgentDef, "name" | "instructions" | "guardrails" | "outputSchema" | "retrieval">,
+  baseInstructions = agentDef.instructions,
+  options?: { retrievedContext?: RetrievedDocument[] }
 ): string {
   // Prune expired secrets before each run
   pruneExpiredSecrets();
@@ -338,16 +457,53 @@ export function buildSystemPrompt(
     sections.push(guardrailSection);
   }
 
-  const items = listKnowledge(agentDef.name);
-  if (items.length === 0) return sections.join("\n\n---\n\n");
+  const outputSection = buildOutputSection(agentDef);
+  if (outputSection) {
+    sections.push(outputSection);
+  }
 
-  const knowledgeSections = items
-    .map((k) => `## ${k.title}\n\n${k.content}`)
-    .join("\n\n---\n\n");
+  const retrievalSection = buildRetrievalSection(agentDef, options?.retrievedContext);
+  if (retrievalSection) {
+    sections.push(retrievalSection);
+  }
 
-  sections.push(
-    `# Knowledge & Skills\n\nThe following knowledge has been provided to help you accomplish tasks:\n\n${knowledgeSections}`
-  );
+  if (shouldInjectStaticKnowledge(agentDef)) {
+    const items = listKnowledge(agentDef.name);
+    if (items.length > 0) {
+      const knowledgeSections = items
+        .map((k) => `## ${k.title}\n\n${k.content}`)
+        .join("\n\n---\n\n");
+
+      sections.push(
+        `# Knowledge & Skills\n\nThe following knowledge has been provided to help you accomplish tasks:\n\n${knowledgeSections}`
+      );
+    }
+  }
 
   return sections.join("\n\n---\n\n");
+}
+
+export function exportBaseKnowledgeSnapshot(): KnowledgeItem[] {
+  return Array.from(knowledgeStore.values()).map((item) => ({ ...item }));
+}
+
+function getKnowledgeCollection(options?: { environment?: string; stage?: ConfigStage }): KnowledgeItem[] {
+  if (isConfigLifecycleEnabled()) {
+    return getConfigSnapshot({
+      environment: options?.environment,
+      stage: options?.stage,
+    }).knowledge;
+  }
+
+  return Array.from(knowledgeStore.values());
+}
+
+function totalKnowledgeCharsInCollection(items: KnowledgeItem[], exclude?: string): number {
+  let total = 0;
+  for (const item of items) {
+    if (item.id !== exclude) {
+      total += item.content.length;
+    }
+  }
+  return total;
 }

@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { httpTool, type HttpToolConfig } from "../tools/http-tool.js";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
+import {
+  getConfigSnapshot,
+  isConfigLifecycleEnabled,
+  mutateDraftSnapshot,
+  type ConfigStage,
+} from "./lifecycle.js";
 
 // ── Schema ──
 
@@ -64,7 +70,8 @@ async function persist(): Promise<void> {
 
 export function registerTool(
   input: z.infer<typeof HttpToolConfigSchema>,
-  agent: string
+  agent: string,
+  options?: { environment?: string }
 ): { ok: true; tool: StoredToolConfig } | { ok: false; error: string } {
   const parsed = HttpToolConfigSchema.safeParse(input);
   if (!parsed.success) {
@@ -73,7 +80,7 @@ export function registerTool(
   }
 
   const now = Date.now();
-  const existing = toolConfigs.get(parsed.data.name);
+  const existing = getTool(parsed.data.name, { environment: options?.environment, stage: "draft" });
   const stored: StoredToolConfig = {
     ...parsed.data,
     agent,
@@ -81,36 +88,84 @@ export function registerTool(
     updatedAt: now,
   };
 
-  toolConfigs.set(stored.name, stored);
-  persist();
+  if (isConfigLifecycleEnabled()) {
+    mutateDraftSnapshot(options?.environment, (snapshot) => {
+      snapshot.tools = snapshot.tools
+        .filter((tool) => tool.name !== stored.name)
+        .concat(stored)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    });
+  } else {
+    toolConfigs.set(stored.name, stored);
+    persist();
+  }
   return { ok: true, tool: stored };
 }
 
 export function updateTool(
   name: string,
-  updates: Partial<z.infer<typeof HttpToolConfigSchema>>
+  updates: Partial<z.infer<typeof HttpToolConfigSchema>>,
+  options?: { environment?: string }
 ): StoredToolConfig | null {
-  const existing = toolConfigs.get(name);
+  const existing = getTool(name, { environment: options?.environment, stage: "draft" });
   if (!existing) return null;
 
-  const merged = { ...existing, ...updates, updatedAt: Date.now() };
-  toolConfigs.set(name, merged);
-  persist();
+  const parsed = HttpToolConfigSchema.safeParse({ ...existing, ...updates });
+  if (!parsed.success) return null;
+
+  const merged = {
+    ...existing,
+    ...parsed.data,
+    agent: existing.agent,
+    createdAt: existing.createdAt,
+    updatedAt: Date.now(),
+  };
+
+  if (isConfigLifecycleEnabled()) {
+    mutateDraftSnapshot(options?.environment, (snapshot) => {
+      snapshot.tools = snapshot.tools
+        .filter((tool) => tool.name !== name)
+        .concat(merged)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    });
+  } else {
+    toolConfigs.set(name, merged);
+    persist();
+  }
   return merged;
 }
 
-export function deleteTool(name: string): boolean {
+export function deleteTool(name: string, options?: { environment?: string }): boolean {
+  if (isConfigLifecycleEnabled()) {
+    return mutateDraftSnapshot(options?.environment, (snapshot) => {
+      const before = snapshot.tools.length;
+      snapshot.tools = snapshot.tools.filter((tool) => tool.name !== name);
+      return snapshot.tools.length !== before;
+    });
+  }
+
   const deleted = toolConfigs.delete(name);
   if (deleted) persist();
   return deleted;
 }
 
-export function getTool(name: string): StoredToolConfig | null {
-  return toolConfigs.get(name) ?? null;
+export function getTool(
+  name: string,
+  options?: { environment?: string; stage?: ConfigStage }
+): StoredToolConfig | null {
+  return listTools(undefined, options).find((tool) => tool.name === name) ?? null;
 }
 
-export function listTools(agent?: string): StoredToolConfig[] {
-  const all = Array.from(toolConfigs.values());
+export function listTools(
+  agent?: string,
+  options?: { environment?: string; stage?: ConfigStage }
+): StoredToolConfig[] {
+  const all = isConfigLifecycleEnabled()
+    ? getConfigSnapshot({
+        environment: options?.environment,
+        stage: options?.stage,
+      }).tools
+    : Array.from(toolConfigs.values());
   if (agent) return all.filter((t) => t.agent === agent);
   return all;
 }
@@ -122,4 +177,8 @@ export function listTools(agent?: string): StoredToolConfig[] {
 export function buildDynamicTools(agent?: string): AgentTool<any, any>[] {
   const configs = listTools(agent);
   return configs.map((config) => httpTool(config) as AgentTool<any, any>);
+}
+
+export function exportBaseToolSnapshot(): StoredToolConfig[] {
+  return Array.from(toolConfigs.values()).map((tool) => ({ ...tool }));
 }

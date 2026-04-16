@@ -7,7 +7,29 @@ import type { AgentDef } from "../config/agent-def.js";
 import { initializeClawless } from "../bootstrap.js";
 import { runAgent } from "../runtime/agent.js";
 import { runAgentStream } from "../runtime/stream.js";
-import { getAgent, getDefaultAgent, listAgents } from "../config/agent-def.js";
+import {
+  deleteRuntimeAgentConfig,
+  deleteRuntimeAgentConfigFor,
+  getAgent,
+  getAgentFor,
+  getDefaultAgent,
+  getDefaultAgentFor,
+  getRuntimeAgentConfig,
+  listAgents,
+  listRuntimeAgentConfigsFor,
+  upsertRuntimeAgentConfig,
+} from "../config/agent-def.js";
+import {
+  getConfigStatus,
+  getRuntimeConfigEnvironment,
+  getRuntimeConfigStage,
+  listConfigEnvironments,
+  listConfigReleases,
+  promoteConfig,
+  publishDraft,
+  rollbackConfig,
+  type ConfigStage,
+} from "../config/lifecycle.js";
 import {
   addKnowledge, updateKnowledge, deleteKnowledge, getKnowledge,
   listKnowledge, buildSystemPrompt, bulkSetup,
@@ -25,6 +47,11 @@ import type { SessionData } from "../session/store.js";
 import { createRequestContext, runWithRequestContext } from "../runtime/request-context.js";
 import { getOutOfScopeMessage, evaluatePromptScope } from "../security/scope.js";
 import { requireAdminAccess, resolveEffectiveUserId } from "../auth/index.js";
+import { StructuredOutputContractError } from "../output/postprocess.js";
+import { buildStructuredOutputTool } from "../output/tool.js";
+import { getAllowedOutputBlocks, getOutputSchemaMode } from "../output/schema.js";
+import { retrieveAgentContext } from "../retrieval/index.js";
+import { listRetrievers, type RetrievedDocument } from "../retrieval/registry.js";
 import { AgentRequestSchema, type AgentRequestBody } from "./validation.js";
 
 export const app = new Hono();
@@ -94,6 +121,35 @@ function shouldFallback(err: unknown, signal?: AbortSignal): boolean {
   return true;
 }
 
+function parseConfigStage(value?: string | null): ConfigStage | undefined {
+  if (value === "draft" || value === "published") {
+    return value;
+  }
+  return undefined;
+}
+
+function resolveConfigEnvironment(c: any, body?: Record<string, unknown>): string | undefined {
+  const queryValue = c.req.query("environment");
+  if (queryValue) return queryValue;
+  const bodyValue = typeof body?.environment === "string" ? body.environment : undefined;
+  return bodyValue;
+}
+
+function resolveConfigStage(c: any, body?: Record<string, unknown>): ConfigStage | undefined {
+  return parseConfigStage(c.req.query("stage")) ?? parseConfigStage(typeof body?.stage === "string" ? body.stage : undefined);
+}
+
+function serializeRetrievalConfig(agentDef: AgentDef | undefined) {
+  if (!agentDef?.retrieval) return null;
+  return {
+    mode: agentDef.retrieval.mode ?? "off",
+    topK: agentDef.retrieval.topK ?? 6,
+    maxChars: agentDef.retrieval.maxChars ?? 6000,
+    instructions: agentDef.retrieval.instructions,
+    sources: agentDef.retrieval.sources ?? [{ type: "knowledge" }],
+  };
+}
+
 // CORS
 app.use("/api/*", cors({
   origin: (origin) => {
@@ -145,6 +201,15 @@ function filterBuiltinsForAgent(agentDef: AgentDef) {
   return filtered;
 }
 
+function buildGeneratedTools(agentDef: AgentDef) {
+  const tools = [];
+  const outputTool = buildStructuredOutputTool(agentDef);
+  if (outputTool) {
+    tools.push(outputTool);
+  }
+  return tools;
+}
+
 async function resolveRequest(userId: string, data: AgentRequestBody, agentDef: AgentDef) {
   const provider = data.provider ?? agentDef.provider ?? DEFAULT_PROVIDER;
   const modelId = data.model ?? agentDef.model ?? DEFAULT_MODEL;
@@ -175,6 +240,7 @@ async function resolveRequest(userId: string, data: AgentRequestBody, agentDef: 
   // Merge all tool sources: config + dynamic + builtins
   const allTools = [
     ...agentDef.tools,
+    ...buildGeneratedTools(agentDef),
     ...buildDynamicTools(agentDef.name),
     ...filterBuiltinsForAgent(agentDef),
   ];
@@ -303,6 +369,13 @@ app.get("/api/providers/:provider/models", async (c) => {
   }
 });
 
+app.get("/api/retrievers", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  return c.json({ retrievers: listRetrievers() });
+});
+
 // ── Capabilities ──
 // Single view of everything the agent can do.
 
@@ -311,13 +384,21 @@ app.get("/api/capabilities", async (c) => {
   if (!admin.ok) return c.json({ error: admin.error }, admin.status);
 
   const agentName = c.req.query("agent");
-  const agentDef = agentName ? getAgent(agentName) : getDefaultAgent();
+  const environment = resolveConfigEnvironment(c);
+  const stage = resolveConfigStage(c);
+  const agentDef = agentName
+    ? getAgentFor(agentName, { environment, stage })
+    : getDefaultAgentFor({ environment, stage });
 
   const configTools = agentDef
     ? agentDef.tools.map((t) => ({ name: t.name, source: "config", description: t.description }))
     : [];
 
-  const dynamicTools = listTools(agentName ?? undefined).map((t) => ({
+  const generatedTools = agentDef
+    ? buildGeneratedTools(agentDef).map((t) => ({ name: t.name, source: "generated", description: t.description }))
+    : [];
+
+  const dynamicTools = listTools(agentName ?? undefined, { environment, stage }).map((t) => ({
     name: t.name,
     source: "dynamic",
     description: t.description,
@@ -331,7 +412,7 @@ app.get("/api/capabilities", async (c) => {
     description: b.description,
   }));
 
-  const knowledge = listKnowledge(agentName ?? undefined).map((k) => ({
+  const knowledge = listKnowledge(agentName ?? undefined, { environment, stage }).map((k) => ({
     id: k.id,
     title: k.title,
     priority: k.priority,
@@ -344,10 +425,25 @@ app.get("/api/capabilities", async (c) => {
   }));
 
   return c.json({
+    environment: environment ?? getRuntimeConfigEnvironment(),
+    stage: stage ?? getRuntimeConfigStage(),
     agent: agentDef?.name ?? null,
-    tools: [...configTools, ...dynamicTools, ...builtins],
+    tools: [...configTools, ...generatedTools, ...dynamicTools, ...builtins],
+    outputSchema: agentDef?.outputSchema
+      ? {
+          mode: getOutputSchemaMode(agentDef.outputSchema),
+          allowedBlocks: getAllowedOutputBlocks(agentDef.outputSchema),
+          preferredBlocks: agentDef.outputSchema.preferredBlocks ?? [],
+          requiredBlocks: agentDef.outputSchema.requiredBlocks ?? [],
+          requireCitations: agentDef.outputSchema.requireCitations ?? false,
+          onInvalid: agentDef.outputSchema.onInvalid ?? (getOutputSchemaMode(agentDef.outputSchema) === "required" ? "reject" : "repair"),
+        }
+      : null,
+    retrieval: serializeRetrievalConfig(agentDef),
+    retrievers: listRetrievers(),
     knowledge,
     secrets,
+    config: getConfigStatus(environment),
   });
 });
 
@@ -382,6 +478,7 @@ app.post("/api/agent", async (c) => {
 
   try {
     let scope: { allowed: boolean; label: string };
+    let retrievedContext: RetrievedDocument[] = [];
     try {
       scope = await enforceRequestScope(parsed.data.prompt, agentDef, modelChain, controller.signal);
     } catch (err) {
@@ -398,6 +495,8 @@ app.post("/api/agent", async (c) => {
         agent: agentDef.name,
         model: scope.label,
         result: getOutOfScopeMessage(agentDef),
+        output: null,
+        retrieval: [],
         toolCalls: [],
         usage: {
           totalInputTokens: 0,
@@ -408,6 +507,8 @@ app.post("/api/agent", async (c) => {
       });
     }
 
+    retrievedContext = await retrieveAgentContext(parsed.data.prompt, agentDef, controller.signal);
+
     let lastError: unknown;
     let usedModel = modelChain[0].label;
 
@@ -415,8 +516,11 @@ app.post("/api/agent", async (c) => {
       try {
         const result = await runWithRequestContext(requestContext, () => runAgent(parsed.data.prompt, {
           model,
-          systemPrompt: buildSystemPrompt(agentDef),
+          systemPrompt: buildSystemPrompt(agentDef, agentDef.instructions, {
+            retrievedContext,
+          }),
           tools: allTools,
+          outputSchema: agentDef.outputSchema,
           messages: session?.messages,
           maxTurns,
           signal: controller.signal,
@@ -429,6 +533,8 @@ app.post("/api/agent", async (c) => {
           agent: agentDef.name,
           model: label,
           result: result.result,
+          output: result.output,
+          retrieval: retrievedContext,
           toolCalls: result.toolCalls,
           usage: result.usage,
         });
@@ -443,6 +549,13 @@ app.post("/api/agent", async (c) => {
     const message = lastError instanceof Error ? lastError.message : String(lastError);
     if (controller.signal.aborted) {
       return c.json({ error: "Request timed out", details: message }, 504);
+    }
+    if (lastError instanceof StructuredOutputContractError) {
+      return c.json({
+        error: "Structured output did not satisfy the declared schema",
+        details: lastError.issues,
+        model: usedModel,
+      }, 422);
     }
     return c.json({ error: "Agent execution failed", model: usedModel, details: message }, 500);
   } finally {
@@ -478,6 +591,7 @@ app.post("/api/agent/stream", async (c) => {
   const timeoutMs = Number(process.env.TIMEOUT_MS) || 120_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let retrievedContext: RetrievedDocument[] = [];
 
   let scope: { allowed: boolean; label: string };
   try {
@@ -505,6 +619,10 @@ app.post("/api/agent/stream", async (c) => {
           data: JSON.stringify({ turn: 1 }),
         });
         await stream.writeSSE({
+          event: "retrieval_ready",
+          data: JSON.stringify({ documents: [] }),
+        });
+        await stream.writeSSE({
           event: "text_done",
           data: JSON.stringify({ text: refusal }),
         });
@@ -517,6 +635,8 @@ app.post("/api/agent/stream", async (c) => {
           data: JSON.stringify({
             sessionKey: currentKey,
             result: refusal,
+            output: null,
+            retrieval: [],
             toolCalls: [],
             usage: {
               totalInputTokens: 0,
@@ -532,8 +652,15 @@ app.post("/api/agent/stream", async (c) => {
     });
   }
 
+  retrievedContext = await retrieveAgentContext(parsed.data.prompt, agentDef, controller.signal);
+
   return streamSSE(c, async (stream) => runWithRequestContext(requestContext, async () => {
     try {
+      await stream.writeSSE({
+        event: "retrieval_ready",
+        data: JSON.stringify({ documents: retrievedContext }),
+      });
+
       for (let i = 0; i < modelChain.length; i++) {
         const { model, label } = modelChain[i];
         const isLast = i === modelChain.length - 1;
@@ -545,8 +672,11 @@ app.post("/api/agent/stream", async (c) => {
 
         const events = runAgentStream(parsed.data.prompt, {
           model,
-          systemPrompt: buildSystemPrompt(agentDef),
+          systemPrompt: buildSystemPrompt(agentDef, agentDef.instructions, {
+            retrievedContext,
+          }),
           tools: allTools,
+          outputSchema: agentDef.outputSchema,
           messages: session?.messages,
           maxTurns,
           signal: controller.signal,
@@ -590,9 +720,18 @@ app.post("/api/agent/stream", async (c) => {
             }
             bufferedEvents.length = 0;
 
+            const payload = "data" in sseEvent ? (
+              sseEvent.event === "agent_end"
+                ? JSON.stringify({
+                    ...sseEvent.data,
+                    retrieval: retrievedContext,
+                  })
+                : JSON.stringify(sseEvent.data)
+            ) : "{}";
+
             await stream.writeSSE({
               event: sseEvent.event,
-              data: "data" in sseEvent ? JSON.stringify(sseEvent.data) : "{}",
+              data: payload,
             });
           }
         }
@@ -664,8 +803,9 @@ app.post("/api/setup", async (c) => {
 
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+  const environment = resolveConfigEnvironment(c, body) ?? getRuntimeConfigEnvironment();
 
-  const defaultAgent = listAgents()[0] ?? "default";
+  const defaultAgent = listAgents({ environment, stage: "draft" })[0] ?? "default";
 
   if (body.knowledge) {
     for (const item of body.knowledge) {
@@ -673,13 +813,13 @@ app.post("/api/setup", async (c) => {
     }
   }
 
-  const knowledgeResults = bulkSetup(body);
+  const knowledgeResults = bulkSetup(body, { environment });
 
   // Tools
   const toolResults: Array<{ name: string; ok: boolean; error?: string }> = [];
   if (body.tools && Array.isArray(body.tools)) {
     for (const toolDef of body.tools) {
-      const result = registerTool(toolDef, defaultAgent);
+      const result = registerTool(toolDef, defaultAgent, { environment });
       if (result.ok) {
         toolResults.push({ name: result.tool.name, ok: true });
       } else {
@@ -697,6 +837,7 @@ app.post("/api/setup", async (c) => {
   }
 
   const allResults = {
+    environment,
     ...knowledgeResults,
     tools: toolResults,
     builtins: builtinResults,
@@ -707,7 +848,170 @@ app.post("/api/setup", async (c) => {
     knowledgeResults.secrets.some((r) => !r.ok) ||
     toolResults.some((r) => !r.ok);
 
+  if (body.publish === true) {
+    const release = publishDraft({
+      environment,
+      note: typeof body.note === "string" ? body.note : "Published from bulk setup",
+    });
+    return c.json({ ...allResults, release }, hasErrors ? 207 : 201);
+  }
+
   return c.json(allResults, hasErrors ? 207 : 201);
+});
+
+// ── Agents ──
+
+app.post("/api/agents", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const body = await c.req.json().catch(() => null);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+
+  const environment = resolveConfigEnvironment(c, body);
+  const result = upsertRuntimeAgentConfig(body, { environment });
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), agent: result.agent }, 201);
+});
+
+app.get("/api/agents", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const environment = resolveConfigEnvironment(c);
+  const stage = resolveConfigStage(c);
+  return c.json({
+    environment: environment ?? getRuntimeConfigEnvironment(),
+    stage: stage ?? getRuntimeConfigStage(),
+    agents: listRuntimeAgentConfigsFor({ environment, stage }),
+  });
+});
+
+app.get("/api/agents/:name", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const environment = resolveConfigEnvironment(c);
+  const stage = resolveConfigStage(c);
+  const agent = getRuntimeAgentConfig(c.req.param("name"), { environment, stage });
+  if (!agent) return c.json({ error: "Not found" }, 404);
+  return c.json({
+    environment: environment ?? getRuntimeConfigEnvironment(),
+    stage: stage ?? getRuntimeConfigStage(),
+    agent,
+  });
+});
+
+app.put("/api/agents/:name", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const body = await c.req.json().catch(() => null);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+
+  const environment = resolveConfigEnvironment(c, body);
+  const existing = getRuntimeAgentConfig(c.req.param("name"), { environment, stage: "draft" });
+  if (!existing) return c.json({ error: "Not found" }, 404);
+
+  const result = upsertRuntimeAgentConfig({
+    ...existing,
+    ...body,
+    name: c.req.param("name"),
+  }, { environment });
+
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json(result.agent);
+});
+
+app.delete("/api/agents/:name", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const environment = resolveConfigEnvironment(c);
+  const deleted = deleteRuntimeAgentConfigFor(c.req.param("name"), { environment });
+  if (!deleted) return c.json({ error: "Not found" }, 404);
+  return c.json({ ok: true, environment: environment ?? getRuntimeConfigEnvironment() });
+});
+
+// ── Config Lifecycle ──
+
+app.get("/api/config", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const environment = resolveConfigEnvironment(c);
+  return c.json({
+    currentEnvironment: getRuntimeConfigEnvironment(),
+    currentStage: getRuntimeConfigStage(),
+    environments: listConfigEnvironments(),
+    status: getConfigStatus(environment),
+  });
+});
+
+app.get("/api/config/releases", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const environment = resolveConfigEnvironment(c);
+  return c.json({
+    environment: environment ?? getRuntimeConfigEnvironment(),
+    releases: listConfigReleases(environment),
+  });
+});
+
+app.post("/api/config/publish", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const body = await c.req.json().catch(() => ({}));
+  const environment = resolveConfigEnvironment(c, body);
+  const release = publishDraft({
+    environment,
+    note: typeof body.note === "string" ? body.note : undefined,
+  });
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), release }, 201);
+});
+
+app.post("/api/config/rollback", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const body = await c.req.json().catch(() => ({}));
+  const environment = resolveConfigEnvironment(c, body);
+  const version = typeof body.version === "number" ? body.version : undefined;
+  const releaseId = typeof body.releaseId === "string" ? body.releaseId : undefined;
+  const release = rollbackConfig({
+    environment,
+    version,
+    releaseId,
+    note: typeof body.note === "string" ? body.note : undefined,
+  });
+
+  if (!release) return c.json({ error: "Release not found" }, 404);
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), release }, 201);
+});
+
+app.post("/api/config/promote", async (c) => {
+  const admin = await requireAdminAccess(c);
+  if (!admin.ok) return c.json({ error: admin.error }, admin.status);
+
+  const body = await c.req.json().catch(() => null);
+  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+  if (typeof body.sourceEnvironment !== "string" || typeof body.targetEnvironment !== "string") {
+    return c.json({ error: "sourceEnvironment and targetEnvironment are required" }, 400);
+  }
+
+  const result = promoteConfig({
+    sourceEnvironment: body.sourceEnvironment,
+    targetEnvironment: body.targetEnvironment,
+    releaseId: typeof body.releaseId === "string" ? body.releaseId : undefined,
+    version: typeof body.version === "number" ? body.version : undefined,
+    publish: body.publish === true,
+    note: typeof body.note === "string" ? body.note : undefined,
+  });
+
+  if (!result) return c.json({ error: "Source release not found" }, 404);
+  return c.json(result, result.release ? 201 : 200);
 });
 
 // ── Knowledge ──
@@ -718,10 +1022,11 @@ app.post("/api/knowledge", async (c) => {
 
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
-  const agent = body.agent ?? listAgents()[0] ?? "default";
-  const result = addKnowledge({ ...body, agent });
+  const environment = resolveConfigEnvironment(c, body);
+  const agent = body.agent ?? listAgents({ environment, stage: "draft" })[0] ?? "default";
+  const result = addKnowledge({ ...body, agent }, { environment });
   if (!result.ok) return c.json({ error: result.error }, 400);
-  return c.json(result.item, 201);
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), item: result.item }, 201);
 });
 
 app.get("/api/knowledge", async (c) => {
@@ -729,16 +1034,24 @@ app.get("/api/knowledge", async (c) => {
   if (!admin.ok) return c.json({ error: admin.error }, admin.status);
 
   const agent = c.req.query("agent");
-  return c.json({ items: listKnowledge(agent ?? undefined) });
+  const environment = resolveConfigEnvironment(c);
+  const stage = resolveConfigStage(c);
+  return c.json({
+    environment: environment ?? getRuntimeConfigEnvironment(),
+    stage: stage ?? getRuntimeConfigStage(),
+    items: listKnowledge(agent ?? undefined, { environment, stage }),
+  });
 });
 
 app.get("/api/knowledge/:id", async (c) => {
   const admin = await requireAdminAccess(c);
   if (!admin.ok) return c.json({ error: admin.error }, admin.status);
 
-  const item = getKnowledge(c.req.param("id"));
+  const environment = resolveConfigEnvironment(c);
+  const stage = resolveConfigStage(c);
+  const item = getKnowledge(c.req.param("id"), { environment, stage });
   if (!item) return c.json({ error: "Not found" }, 404);
-  return c.json(item);
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), stage: stage ?? getRuntimeConfigStage(), item });
 });
 
 app.put("/api/knowledge/:id", async (c) => {
@@ -747,17 +1060,19 @@ app.put("/api/knowledge/:id", async (c) => {
 
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
-  const updated = updateKnowledge(c.req.param("id"), body);
+  const environment = resolveConfigEnvironment(c, body);
+  const updated = updateKnowledge(c.req.param("id"), body, { environment });
   if (!updated) return c.json({ error: "Not found or would exceed size limit" }, 400);
-  return c.json(updated);
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), item: updated });
 });
 
 app.delete("/api/knowledge/:id", async (c) => {
   const admin = await requireAdminAccess(c);
   if (!admin.ok) return c.json({ error: admin.error }, admin.status);
 
-  deleteKnowledge(c.req.param("id"));
-  return c.json({ ok: true });
+  const environment = resolveConfigEnvironment(c);
+  deleteKnowledge(c.req.param("id"), { environment });
+  return c.json({ ok: true, environment: environment ?? getRuntimeConfigEnvironment() });
 });
 
 // ── Secrets ──
@@ -803,10 +1118,11 @@ app.post("/api/tools", async (c) => {
 
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
-  const agent = body.agent ?? listAgents()[0] ?? "default";
-  const result = registerTool(body, agent);
+  const environment = resolveConfigEnvironment(c, body);
+  const agent = body.agent ?? listAgents({ environment, stage: "draft" })[0] ?? "default";
+  const result = registerTool(body, agent, { environment });
   if (!result.ok) return c.json({ error: result.error }, 400);
-  return c.json(result.tool, 201);
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), tool: result.tool }, 201);
 });
 
 app.get("/api/tools", async (c) => {
@@ -814,16 +1130,24 @@ app.get("/api/tools", async (c) => {
   if (!admin.ok) return c.json({ error: admin.error }, admin.status);
 
   const agent = c.req.query("agent");
-  return c.json({ tools: listTools(agent ?? undefined) });
+  const environment = resolveConfigEnvironment(c);
+  const stage = resolveConfigStage(c);
+  return c.json({
+    environment: environment ?? getRuntimeConfigEnvironment(),
+    stage: stage ?? getRuntimeConfigStage(),
+    tools: listTools(agent ?? undefined, { environment, stage }),
+  });
 });
 
 app.get("/api/tools/:name", async (c) => {
   const admin = await requireAdminAccess(c);
   if (!admin.ok) return c.json({ error: admin.error }, admin.status);
 
-  const tool = getTool(c.req.param("name"));
+  const environment = resolveConfigEnvironment(c);
+  const stage = resolveConfigStage(c);
+  const tool = getTool(c.req.param("name"), { environment, stage });
   if (!tool) return c.json({ error: "Not found" }, 404);
-  return c.json(tool);
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), stage: stage ?? getRuntimeConfigStage(), tool });
 });
 
 app.put("/api/tools/:name", async (c) => {
@@ -832,17 +1156,19 @@ app.put("/api/tools/:name", async (c) => {
 
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
-  const updated = updateTool(c.req.param("name"), body);
+  const environment = resolveConfigEnvironment(c, body);
+  const updated = updateTool(c.req.param("name"), body, { environment });
   if (!updated) return c.json({ error: "Not found" }, 404);
-  return c.json(updated);
+  return c.json({ environment: environment ?? getRuntimeConfigEnvironment(), tool: updated });
 });
 
 app.delete("/api/tools/:name", async (c) => {
   const admin = await requireAdminAccess(c);
   if (!admin.ok) return c.json({ error: admin.error }, admin.status);
 
-  deleteTool(c.req.param("name"));
-  return c.json({ ok: true });
+  const environment = resolveConfigEnvironment(c);
+  deleteTool(c.req.param("name"), { environment });
+  return c.json({ ok: true, environment: environment ?? getRuntimeConfigEnvironment() });
 });
 
 // ── Builtins ──

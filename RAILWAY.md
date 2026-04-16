@@ -7,6 +7,7 @@ Clawless gives you:
 - request-driven agent execution with SSE streaming
 - multi-user sessions and per-user memos
 - dynamic tools, knowledge, and secrets via REST API
+- indexed retrieval plus pluggable RAG sources for larger knowledge sets
 - durable Postgres/Supabase-backed state
 - production-safe defaults for auth, admin routes, and outbound HTTP
 
@@ -134,6 +135,7 @@ For focused application backends:
 - set `guardrails.outOfScopeMessage`
 - keep `guardrails.hideInternalDetails` enabled
 - keep `networkPolicy.mode` as `contextual` unless you intentionally want open-web behavior
+- add `outputSchema` if your frontend expects cards, tables, timelines, forms, filters, actions, or citations
 - prefer app-specific tools over generic browsing
 
 Example:
@@ -150,6 +152,14 @@ export const shoppingAssistant = defineAgent({
   networkPolicy: {
     mode: "contextual",
   },
+  outputSchema: {
+    mode: "required",
+    allowedBlocks: ["cards", "actions", "citations"],
+    preferredBlocks: ["cards", "actions"],
+    requiredBlocks: ["cards", "actions"],
+    requireCitations: true,
+    onInvalid: "reject",
+  },
   tools: [
     searchCatalogTool,
     getProductDetailsTool,
@@ -160,7 +170,7 @@ export const shoppingAssistant = defineAgent({
 
 ## Runtime Configuration From Your App
 
-Once deployed, your app can configure tools, knowledge, and secrets through admin routes.
+Once deployed, your app can configure agents, tools, knowledge, and secrets through admin routes.
 
 Use the admin key for setup/config operations:
 
@@ -203,6 +213,27 @@ Notes:
 - if `agent` is omitted on tools or knowledge, Clawless assigns them to the first configured agent
 - URLs inside knowledge can widen the contextual outbound allowlist for builtin HTTP tools
 - do not put secrets into knowledge
+- runtime-managed agents, tools, and knowledge now write to the target environment draft first
+- publish with `POST /api/config/publish` once the draft is ready
+- promote with `POST /api/config/promote` to move a validated release between environments
+- if the agent has large docs or product catalogs, configure `retrieval` on the agent instead of injecting everything as static knowledge
+
+## Draft / Publish Workflow
+
+Recommended Railway setup:
+
+- staging deployment: `CONFIG_ENV=staging`, `CONFIG_STAGE=published`
+- production deployment: `CONFIG_ENV=production`, `CONFIG_STAGE=published`
+- local/dev: let Clawless use the default draft stage
+
+Typical flow:
+
+1. write changes into `staging` draft through `/api/agents`, `/api/tools`, `/api/knowledge`, or `/api/setup`
+2. `POST /api/config/publish` for `staging`
+3. validate the staging deployment
+4. `POST /api/config/promote` from `staging` to `production` with `"publish": true`
+
+This keeps operational changes reversible and avoids editing the live production snapshot directly.
 
 ## Making User Requests
 
@@ -239,6 +270,7 @@ In production, normal users should not need to provide `userId` manually if auth
 - prefer Railway Postgres or external Postgres/Supabase for durable state
 - use `ADMIN_API_KEY` even if you also use JWT auth, because it keeps operational setup simple
 - if you need env-backed secrets, expose them with the safe prefix `CLAWLESS_SECRET_` by default
+- set `CONFIG_ENV` explicitly per deployment so release promotion has a stable target
 
 ## When To Use `fetch_page` And `json_request`
 
@@ -263,6 +295,17 @@ Cause:
 Fix:
 
 - set `DATABASE_URL`
+
+### Setup changes do not appear in production
+
+Cause:
+
+- the deployment is serving `published`, but your changes are still only in draft
+
+Fix:
+
+- `POST /api/config/publish` for that environment
+- or confirm `CONFIG_STAGE` if this is a staging/dev deployment
 
 ### `/api/setup`, `/api/providers`, or `/api/capabilities` returns 401/403
 
@@ -309,3 +352,7 @@ For the Railway template, the intended production shape is:
 - app-specific agent instructions, guardrails, tools, knowledge, and `networkPolicy`
 
 If you keep those pieces in place, the Railway template is a solid base for an app-specific AI backend rather than a generic public chatbot.
+
+If your app frontend renders rich UI, pair the template with `outputSchema` so the backend can return validated structured output instead of forcing the client to infer cards, tables, or actions from plain text. Tool results also carry canonical `ui` payloads now, so frontends can render intermediate API/search results without scraping raw JSON strings from `tool_end`.
+
+If your app has a large policy corpus, product catalog, or knowledge base, pair the template with `retrieval`. The built-in indexed knowledge retriever can search knowledge chunks per request, and code-registered retrievers let you plug in external RAG/vector backends without changing the request API.
