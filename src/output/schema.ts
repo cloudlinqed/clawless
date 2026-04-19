@@ -1,16 +1,16 @@
 import { z } from "zod";
 import type { AgentOutputBlockType, AgentOutputSchema } from "../config/agent-def.js";
+import {
+  BUILTIN_OUTPUT_BLOCK_TYPES,
+  getRegisteredBlock,
+  getRegisteredBlocks,
+} from "./block-registry.js";
 
-export const SUPPORTED_OUTPUT_BLOCK_TYPES = [
-  "markdown",
-  "cards",
-  "table",
-  "timeline",
-  "form",
-  "filters",
-  "actions",
-  "citations",
-] as const satisfies readonly AgentOutputBlockType[];
+export const SUPPORTED_OUTPUT_BLOCK_TYPES = BUILTIN_OUTPUT_BLOCK_TYPES;
+
+export function getSupportedOutputBlockTypes(): string[] {
+  return [...BUILTIN_OUTPUT_BLOCK_TYPES, ...getRegisteredBlocks().map((block) => block.type)];
+}
 
 const OutputBlockTypeSchema = z.enum(SUPPORTED_OUTPUT_BLOCK_TYPES);
 
@@ -154,7 +154,7 @@ const CitationsBlockSchema = z.object({
   citations: z.array(OutputCitationSchema).min(1),
 });
 
-export const StructuredOutputBlockSchema = z.discriminatedUnion("type", [
+const BuiltinOutputBlockSchemas = [
   MarkdownBlockSchema,
   CardsBlockSchema,
   TableBlockSchema,
@@ -163,15 +163,43 @@ export const StructuredOutputBlockSchema = z.discriminatedUnion("type", [
   FiltersBlockSchema,
   ActionsBlockSchema,
   CitationsBlockSchema,
-]);
+] as const;
 
-export type StructuredOutputBlock = z.infer<typeof StructuredOutputBlockSchema>;
+export const StructuredOutputBlockSchema = z.discriminatedUnion("type", [...BuiltinOutputBlockSchemas]);
+
+export type StructuredOutputBlock =
+  | z.infer<typeof StructuredOutputBlockSchema>
+  | { type: string; [key: string]: unknown };
+
+/**
+ * Build the effective discriminated union, including any blocks registered
+ * through `registerBlock()`. Called on every validation so runtime-registered
+ * blocks are picked up without process restart.
+ */
+export function getStructuredOutputBlockSchema(): z.ZodTypeAny {
+  const custom = getRegisteredBlocks();
+  if (custom.length === 0) {
+    return StructuredOutputBlockSchema;
+  }
+  return z.discriminatedUnion("type", [
+    ...BuiltinOutputBlockSchemas,
+    ...(custom.map((block) => block.schema) as any),
+  ]);
+}
 
 export const StructuredOutputSchema = z.object({
   version: z.literal(1).default(1),
   summary: z.string().optional(),
   blocks: z.array(StructuredOutputBlockSchema).min(1),
 });
+
+export function getStructuredOutputSchema() {
+  return z.object({
+    version: z.literal(1).default(1),
+    summary: z.string().optional(),
+    blocks: z.array(getStructuredOutputBlockSchema()).min(1),
+  });
+}
 
 export type StructuredOutput = z.infer<typeof StructuredOutputSchema>;
 
@@ -182,7 +210,7 @@ export function getOutputSchemaMode(schema?: AgentOutputSchema): "auto" | "requi
 export function getAllowedOutputBlocks(schema?: AgentOutputSchema): AgentOutputBlockType[] {
   return schema?.allowedBlocks?.length
     ? [...schema.allowedBlocks]
-    : [...SUPPORTED_OUTPUT_BLOCK_TYPES];
+    : (getSupportedOutputBlockTypes() as AgentOutputBlockType[]);
 }
 
 export function getPreferredOutputBlocks(schema?: AgentOutputSchema): AgentOutputBlockType[] {
@@ -201,17 +229,22 @@ export function getOutputInvalidPolicy(schema?: AgentOutputSchema): "repair" | "
 }
 
 function blockContainsCitations(block: StructuredOutputBlock): boolean {
-  switch (block.type) {
+  const anyBlock = block as any;
+  switch (anyBlock.type) {
     case "cards":
-      return block.cards.some((card) => (card.citations?.length ?? 0) > 0);
+      return Array.isArray(anyBlock.cards)
+        && anyBlock.cards.some((card: any) => (card?.citations?.length ?? 0) > 0);
     case "table":
-      return (block.citations?.length ?? 0) > 0;
+      return (anyBlock.citations?.length ?? 0) > 0;
     case "timeline":
-      return block.items.some((item) => (item.citations?.length ?? 0) > 0);
+      return Array.isArray(anyBlock.items)
+        && anyBlock.items.some((item: any) => (item?.citations?.length ?? 0) > 0);
     case "citations":
-      return block.citations.length > 0;
-    default:
-      return false;
+      return Array.isArray(anyBlock.citations) && anyBlock.citations.length > 0;
+    default: {
+      const custom = getRegisteredBlock(anyBlock.type);
+      return custom?.providesCitations === true;
+    }
   }
 }
 
@@ -224,15 +257,15 @@ export function findMissingRequiredBlocks(
     return [];
   }
 
-  const present = new Set(output.blocks.map((block) => block.type));
-  return Array.from(required).filter((blockType) => !present.has(blockType));
+  const present = new Set<string>(output.blocks.map((block) => block.type));
+  return Array.from(required).filter((blockType) => !present.has(String(blockType)));
 }
 
 export function validateStructuredOutput(
   value: unknown,
   schema?: AgentOutputSchema
 ): StructuredOutput {
-  const parsed = StructuredOutputSchema.parse(value);
+  const parsed = getStructuredOutputSchema().parse(value) as StructuredOutput;
   const allowedBlocks = new Set(getAllowedOutputBlocks(schema));
 
   for (const block of parsed.blocks) {

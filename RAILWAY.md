@@ -10,6 +10,24 @@ Clawless gives you:
 - indexed retrieval plus pluggable RAG sources for larger knowledge sets
 - durable Postgres/Supabase-backed state
 - production-safe defaults for auth, admin routes, and outbound HTTP
+- structured UI output — cards, tables, timelines, forms, filters, actions, citations, plus custom block types you register yourself
+
+## What To Configure And Where
+
+| Goal | Where |
+|---|---|
+| Change what the agent does | `clawless.config.ts` (`instructions`, `guardrails`, `tools`) |
+| Add a REST API as a tool | `clawless.config.ts` (`httpTool`) or `POST /api/tools` at runtime |
+| Add domain UI blocks (charts, maps, …) | `clawless.config.ts` (`registerBlock`) — see README "Custom UI Blocks" |
+| Teach the agent facts | `POST /api/knowledge` or `POST /api/setup` |
+| Store API keys | `POST /api/secrets` or `CLAWLESS_SECRET_*` env vars |
+| Turn on web search / image / TTS | `POST /api/builtins/<name>/enable` after providing the key |
+| Plug in a vector DB for RAG | `registerRetriever` in code + `retrieval.sources[{type:"retriever",name:"..."}]` |
+| Promote staging to prod | `POST /api/config/promote` |
+| Require auth | env vars (`AUTH_TRUSTED_USER_HEADER` or `AUTH_JWKS_URL`/`AUTH_JWT_SECRET`) |
+| Restrict outbound HTTP | `networkPolicy` on the agent |
+
+Full reference is in `README.md`. This file focuses on what Railway users hit most.
 
 ## What Railway Is Good For
 
@@ -354,5 +372,7 @@ For the Railway template, the intended production shape is:
 If you keep those pieces in place, the Railway template is a solid base for an app-specific AI backend rather than a generic public chatbot.
 
 If your app frontend renders rich UI, pair the template with `outputSchema` so the backend can return validated structured output instead of forcing the client to infer cards, tables, or actions from plain text. Tool results also carry canonical `ui` payloads now, so frontends can render intermediate API/search results without scraping raw JSON strings from `tool_end`.
+
+If your product needs UI blocks that aren't in the shipped set (charts, maps, mermaid diagrams, kanban, code diffs, etc.), register custom block types in `clawless.config.ts` with `registerBlock()`. They become valid targets in `outputSchema.allowedBlocks/preferredBlocks/requiredBlocks`, are advertised to the agent through the `present_output` tool, and can auto-adapt from matching tool JSON. See the "Custom UI Blocks" section in `README.md` for the full shape and a chart example.
 
 If your app has a large policy corpus, product catalog, or knowledge base, pair the template with `retrieval`. The built-in indexed knowledge retriever can search knowledge chunks per request, and code-registered retrievers let you plug in external RAG/vector backends without changing the request API.

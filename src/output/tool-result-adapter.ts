@@ -1,12 +1,13 @@
 import {
-  StructuredOutputSchema,
   createMarkdownFallbackOutput,
+  getStructuredOutputSchema,
   parseStructuredOutputText,
   type OutputAction,
   type OutputCitation,
   type StructuredOutput,
   type StructuredOutputBlock,
 } from "./schema.js";
+import { getRegisteredBlocks } from "./block-registry.js";
 
 export interface ToolResultAdapterInput {
   toolName: string;
@@ -51,6 +52,13 @@ export function adaptToolResultToOutput(input: ToolResultAdapterInput): Structur
     return createMarkdownFallbackOutput(truncateText(trimmed, 5000));
   }
 
+  const title = input.toolLabel ?? humanizeToolName(input.toolName);
+
+  const customPreEnvelope = adaptWithRegisteredBlocks(parsed, { title });
+  if (customPreEnvelope) {
+    return customPreEnvelope;
+  }
+
   const { value, summaryPrefix } = unwrapEnvelope(parsed);
 
   const known = adaptKnownToolResult(input, value, summaryPrefix);
@@ -58,8 +66,13 @@ export function adaptToolResultToOutput(input: ToolResultAdapterInput): Structur
     return known;
   }
 
+  const customPostEnvelope = adaptWithRegisteredBlocks(value, { title, summaryPrefix });
+  if (customPostEnvelope) {
+    return customPostEnvelope;
+  }
+
   const generic = adaptGenericValue(value, {
-    title: input.toolLabel ?? humanizeToolName(input.toolName),
+    title,
     summaryPrefix,
   });
 
@@ -68,6 +81,39 @@ export function adaptToolResultToOutput(input: ToolResultAdapterInput): Structur
   }
 
   return createMarkdownFallbackOutput(truncateText(trimmed, 5000));
+}
+
+function adaptWithRegisteredBlocks(
+  value: unknown,
+  options: { title: string; summaryPrefix?: string }
+): StructuredOutput | null {
+  const registered = getRegisteredBlocks();
+  if (registered.length === 0) {
+    return null;
+  }
+
+  for (const definition of registered) {
+    if (!definition.adaptFromTool) continue;
+    try {
+      const produced = definition.adaptFromTool(value, {
+        title: options.title,
+        summaryPrefix: options.summaryPrefix,
+      });
+      if (!produced) continue;
+
+      const validated = definition.schema.safeParse(produced);
+      if (!validated.success) continue;
+
+      return finalizeOutput(
+        [validated.data as unknown as StructuredOutputBlock],
+        options.summaryPrefix
+      );
+    } catch {
+      // Keep trying other adapters.
+    }
+  }
+
+  return null;
 }
 
 function adaptKnownToolResult(
@@ -635,11 +681,11 @@ function tryParseJson(text: string): unknown | undefined {
 
 function finalizeOutput(blocks: StructuredOutputBlock[], summary?: string): StructuredOutput | null {
   try {
-    return StructuredOutputSchema.parse({
+    return getStructuredOutputSchema().parse({
       version: 1,
       summary,
       blocks,
-    });
+    }) as StructuredOutput;
   } catch {
     return null;
   }

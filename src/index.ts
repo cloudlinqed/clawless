@@ -112,6 +112,23 @@ export {
   StructuredOutputContractError,
 } from "./output/postprocess.js";
 export type { StructuredOutputPostprocessInput, StructuredOutputPostprocessResult } from "./output/postprocess.js";
+export {
+  registerBlock,
+  getRegisteredBlock,
+  getRegisteredBlocks,
+  getRegisteredBlockTypes,
+  getBuiltinBlockTypes,
+  getAllBlockTypes,
+  isCustomBlockType,
+  clearRegisteredBlocks,
+  BUILTIN_OUTPUT_BLOCK_TYPES,
+} from "./output/block-registry.js";
+export type {
+  CustomBlockDefinition,
+  CustomBlockSchema,
+  CustomBlockAdapterContext,
+  BuiltinOutputBlockType,
+} from "./output/block-registry.js";
 
 // Retrieval
 export {

@@ -11,6 +11,7 @@ import {
   validateStructuredOutput,
   type StructuredOutput,
 } from "./schema.js";
+import { getRegisteredBlocks } from "./block-registry.js";
 
 const ActionSchema = Type.Object({
   id: Type.String({ description: "Stable action id" }),
@@ -108,11 +109,21 @@ function buildToolDescription(schema: AgentOutputSchema): string {
   const preferred = describePreferredBlocks(schema);
   const mode = getOutputSchemaMode(schema);
 
+  const allowedSet = new Set(allowed.split(",").map((entry) => entry.trim()));
+  const customBlocks = getRegisteredBlocks().filter((block) => allowedSet.has(block.type));
+
   const lines = [
     "Create the UI-ready response payload for the current agent result.",
     "Use this instead of relying on the frontend to reverse-engineer cards, tables, timelines, forms, filters, actions, or citations from plain text.",
     `Allowed block types: ${allowed}.`,
   ];
+
+  if (customBlocks.length > 0) {
+    lines.push("Custom block shapes (produce these when they fit):");
+    for (const block of customBlocks) {
+      lines.push(`- ${block.type}: ${block.toolDescription}`);
+    }
+  }
 
   if (preferred) {
     lines.push(`Prefer these block types when they fit: ${preferred}.`);

@@ -11,6 +11,30 @@ Clawless is designed for developers who want:
 - durable sessions, memos, tools, knowledge, and secrets
 - indexed retrieval and pluggable RAG sources for larger knowledge sets
 - secure defaults in production without a large setup burden
+- structured UI output — cards, tables, timelines, forms, filters, actions, citations, and custom block types you register yourself
+
+## System layers at a glance
+
+If you are a developer or an AI reading this doc to orient, start here. Each layer is independently configurable.
+
+| Layer | What it is | Where it lives | Change at runtime? |
+|---|---|---|---|
+| **Agent definition** | Instructions, guardrails, output schema, retrieval, default model | `clawless.config.ts` + `POST /api/agents` | Yes (draft → publish) |
+| **Tools — code** | `defineTool`/`httpTool` baked into the repo | `clawless.config.ts` | No — redeploy |
+| **Tools — dynamic HTTP** | Declarative REST wrappers registered via admin API | `POST /api/tools` | Yes (draft → publish) |
+| **Tools — built-in** | 14 shipped tools (fetch_page, web_search, memo, subagents, …) | `src/tools/builtins/` | Yes (enable/disable) |
+| **Knowledge** | Agent-scoped facts, policies, workflow notes | `POST /api/knowledge` | Yes (draft → publish) |
+| **Secrets** | API keys resolved server-side by name in tool URLs/headers | `POST /api/secrets` or env with `CLAWLESS_SECRET_` prefix | Yes |
+| **Retrieval** | Indexed knowledge search + pluggable retrievers | `retrieval` on agent + `registerRetriever` in code | Config yes, retriever code-only |
+| **Structured output** | 8 shipped UI block types + your custom blocks | `outputSchema` on agent + `registerBlock` in code | Schema yes, block registration code-only |
+| **Sessions & memos** | Multi-turn state + per-user memory, pluggable stores | Memory (dev) or Postgres (prod) via `DATABASE_URL` | N/A — runtime state |
+| **Auth** | Trusted header, JWT+JWKS, or admin API key | Env vars — production closes admin/user routes by default | N/A |
+| **Config lifecycle** | Draft / published snapshots, promote across environments | `POST /api/config/{publish,rollback,promote}` | Yes |
+| **Network policy** | Per-agent outbound allowlist for `fetch_page` / `json_request` | `networkPolicy` on agent | Yes |
+
+**Rule of thumb:** if something is a *capability* (tool, block type, retriever) it registers in code; if something is *content or policy* (knowledge, guardrails, allowed blocks, secrets) it can be edited at runtime through the admin API.
+
+**For AI readers:** the code entry points are `src/index.ts` (public exports), `src/router/handler.ts` (all HTTP routes), `src/bootstrap.ts` (wiring), `src/runtime/agent.ts` (agent loop), `src/output/schema.ts` + `src/output/block-registry.ts` (UI blocks). Tests in `tests/` are the shortest path to understanding any behavior.
 
 ## Setup
 
@@ -263,6 +287,65 @@ The per-agent schema can also:
 - repair invalid output or reject the request via `onInvalid`
 
 If `onInvalid: "reject"` and Clawless still cannot satisfy the contract after salvage/repair, `/api/agent` returns `422` instead of silently returning the wrong shape.
+
+### Custom UI Blocks
+
+The 8 built-in block types cover most use cases, but some products need domain-specific UI — charts, maps, mermaid diagrams, kanban boards, code diffs, video, and so on. Register your own block types in code and they become first-class citizens alongside the built-ins: validated by zod, accepted by `allowedBlocks`, advertised to the LLM through `present_output`, and auto-adapted from tool results.
+
+```ts
+// clawless.config.ts
+import { z } from "zod";
+import { defineAgent, registerBlock } from "clawless";
+
+registerBlock({
+  type: "chart",
+  schema: z.object({
+    type: z.literal("chart"),
+    title: z.string().optional(),
+    chartType: z.enum(["line", "bar", "pie"]),
+    xKey: z.string(),
+    yKey: z.string(),
+    data: z.array(z.record(z.string(), z.union([z.string(), z.number()]))).min(1),
+  }),
+  toolDescription:
+    "Chart block. Fields: chartType ('line'|'bar'|'pie'), xKey, yKey, data (array of rows).",
+  // Optional: turn matching tool JSON into this block automatically
+  adaptFromTool: (value) => {
+    const r = value as any;
+    return r?.chartType && Array.isArray(r?.data) ? { type: "chart", ...r } : null;
+  },
+});
+
+export const analyticsAgent = defineAgent({
+  name: "analytics",
+  instructions: "You help users understand their analytics data.",
+  outputSchema: {
+    mode: "required",
+    allowedBlocks: ["cards", "chart"],
+    preferredBlocks: ["chart"],
+  },
+  tools: [getTrafficTool, getRevenueTool],
+});
+```
+
+Field-by-field:
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | Yes | Unique block name. Cannot collide with a built-in or another custom block. Letters, digits, `_`, `-`. |
+| `schema` | Yes | `z.object({ type: z.literal("<name>"), ... })` that validates instances of this block. |
+| `toolDescription` | Yes | Short natural-language shape description. Shown to the LLM in the `present_output` tool. |
+| `adaptFromTool` | No | `(value, ctx) => block \| null`. Recognizes matching tool JSON and turns it into an instance of this block. Runs twice: once on the raw parsed tool value, once after envelope unwrapping. |
+| `providesCitations` | No | Set `true` if this block embeds citations in its own shape, so `requireCitations` can be satisfied by it. |
+
+Rules:
+
+- Register at module top-level in `clawless.config.ts` (or any module imported before the server starts). Calling `registerBlock` after the first request is not recommended.
+- Block types are global to the process; every agent can opt into them through `allowedBlocks`.
+- If a registered block fails its own zod schema at validation time, the request goes through the standard salvage → format → repair pipeline and ultimately returns `422` if `onInvalid: "reject"`.
+- You can reference custom block names in `allowedBlocks`, `preferredBlocks`, and `requiredBlocks` just like built-ins — the types accept any string while preserving autocomplete for the 8 built-ins.
+
+Exports from the `clawless` package: `registerBlock`, `getRegisteredBlocks`, `getRegisteredBlockTypes`, `getBuiltinBlockTypes`, `getAllBlockTypes`, `isCustomBlockType`, `clearRegisteredBlocks`, `BUILTIN_OUTPUT_BLOCK_TYPES`.
 
 ### Recommended Hardening For Product-Specific Agents
 

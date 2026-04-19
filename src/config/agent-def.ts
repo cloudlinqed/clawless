@@ -73,7 +73,7 @@ export interface AgentNetworkPolicy {
   allowHttp?: boolean;
 }
 
-export type AgentOutputBlockType =
+export type BuiltinOutputBlockType =
   | "markdown"
   | "cards"
   | "table"
@@ -82,6 +82,13 @@ export type AgentOutputBlockType =
   | "filters"
   | "actions"
   | "citations";
+
+/**
+ * A UI block type. Built-in types get autocomplete; any additional string is
+ * accepted so custom blocks registered via `registerBlock()` can also be
+ * referenced here.
+ */
+export type AgentOutputBlockType = BuiltinOutputBlockType | (string & {});
 
 export interface AgentOutputSchema {
   /**

@@ -25,16 +25,10 @@ export const AgentNetworkPolicySchema = z.object({
   allowHttp: z.boolean().optional(),
 }).strict();
 
-export const AgentOutputBlockTypeSchema = z.enum([
-  "markdown",
-  "cards",
-  "table",
-  "timeline",
-  "form",
-  "filters",
-  "actions",
-  "citations",
-]);
+export const AgentOutputBlockTypeSchema = z
+  .string()
+  .min(1)
+  .regex(/^[a-z][a-z0-9_-]*$/i, "Block type must start with a letter and contain only letters, digits, '_' or '-'");
 
 export const AgentOutputSchemaSchema = z.object({
   mode: z.enum(["auto", "required", "off"]).optional(),

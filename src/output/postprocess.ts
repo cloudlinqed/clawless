@@ -183,7 +183,7 @@ function salvageStructuredOutput(
     const missingRequired = findMissingRequiredBlocks({
       version: 1,
       summary: currentOutput?.summary ?? summarize(input.result),
-      blocks: selected,
+      blocks: selected as any,
     }, schema);
 
     if (missingRequired.length > 0) {
@@ -203,7 +203,7 @@ function salvageStructuredOutput(
   return {
     version: 1,
     summary: currentOutput?.summary ?? summarize(input.result),
-    blocks: selected,
+    blocks: selected as any,
   };
 }
 
@@ -215,15 +215,18 @@ function pushUniqueBlock(target: StructuredOutputBlock[], block: StructuredOutpu
 }
 
 function blockContainsCitations(block: StructuredOutputBlock): boolean {
-  switch (block.type) {
+  const anyBlock = block as any;
+  switch (anyBlock.type) {
     case "cards":
-      return block.cards.some((card) => (card.citations?.length ?? 0) > 0);
+      return Array.isArray(anyBlock.cards)
+        && anyBlock.cards.some((card: any) => (card?.citations?.length ?? 0) > 0);
     case "table":
-      return (block.citations?.length ?? 0) > 0;
+      return (anyBlock.citations?.length ?? 0) > 0;
     case "timeline":
-      return block.items.some((item) => (item.citations?.length ?? 0) > 0);
+      return Array.isArray(anyBlock.items)
+        && anyBlock.items.some((item: any) => (item?.citations?.length ?? 0) > 0);
     case "citations":
-      return block.citations.length > 0;
+      return Array.isArray(anyBlock.citations) && anyBlock.citations.length > 0;
     default:
       return false;
   }
