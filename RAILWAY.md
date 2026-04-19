@@ -1,78 +1,51 @@
 # Deploy Clawless on Railway
 
-This repo ships as a Railway-friendly template for running Clawless as a reusable AI backend.
+Clawless is a reusable AI backend template: request-driven agents with SSE streaming, multi-user sessions and memos, dynamic tools/knowledge/secrets via REST, indexed + pluggable RAG retrieval, durable Postgres-backed state, production-safe auth and SSRF defaults, and structured UI output (cards, tables, timelines, forms, filters, actions, citations + custom block types you register yourself).
 
-Clawless gives you:
-
-- request-driven agent execution with SSE streaming
-- multi-user sessions and per-user memos
-- dynamic tools, knowledge, and secrets via REST API
-- indexed retrieval plus pluggable RAG sources for larger knowledge sets
-- durable Postgres/Supabase-backed state
-- production-safe defaults for auth, admin routes, and outbound HTTP
-- structured UI output — cards, tables, timelines, forms, filters, actions, citations, plus custom block types you register yourself
+Full reference lives in `README.md`. This file covers Railway-specific setup.
 
 ## What To Configure And Where
 
 | Goal | Where |
 |---|---|
-| Change what the agent does | `clawless.config.ts` (`instructions`, `guardrails`, `tools`) |
-| Add a REST API as a tool | `clawless.config.ts` (`httpTool`) or `POST /api/tools` at runtime |
-| Add domain UI blocks (charts, maps, …) | `clawless.config.ts` (`registerBlock`) — see README "Custom UI Blocks" |
+| Change agent behavior | `clawless.config.ts` (`instructions`, `guardrails`, `tools`) |
+| Add a REST API as a tool | `clawless.config.ts` (`httpTool`) or `POST /api/tools` |
+| Add domain UI blocks (charts, maps, …) | `clawless.config.ts` (`registerBlock`) — see README |
 | Teach the agent facts | `POST /api/knowledge` or `POST /api/setup` |
 | Store API keys | `POST /api/secrets` or `CLAWLESS_SECRET_*` env vars |
-| Turn on web search / image / TTS | `POST /api/builtins/<name>/enable` after providing the key |
-| Plug in a vector DB for RAG | `registerRetriever` in code + `retrieval.sources[{type:"retriever",name:"..."}]` |
-| Promote staging to prod | `POST /api/config/promote` |
-| Require auth | env vars (`AUTH_TRUSTED_USER_HEADER` or `AUTH_JWKS_URL`/`AUTH_JWT_SECRET`) |
+| Enable web search / image / TTS | `POST /api/builtins/<name>/enable` after providing the key |
+| Plug in a vector DB for RAG | `registerRetriever` in code + `retrieval.sources` |
+| Promote staging → prod | `POST /api/config/promote` |
+| Require auth | env: `AUTH_TRUSTED_USER_HEADER` or `AUTH_JWKS_URL` / `AUTH_JWT_SECRET` |
 | Restrict outbound HTTP | `networkPolicy` on the agent |
 
-Full reference is in `README.md`. This file focuses on what Railway users hit most.
+## Production Defaults On Railway
 
-## What Railway Is Good For
+Treat a Railway deploy as production unless it is a private staging instance.
 
-Railway is a good fit if you want:
+- auth required for user routes
+- admin/config routes closed (open them with `ADMIN_API_KEY` or JWT admin role)
+- `fetch_page` / `json_request` constrained by each agent's `networkPolicy`
+- outbound HTTP blocks localhost and private-network SSRF targets
+- secret resolution uses registered secrets or `CLAWLESS_SECRET_*` env vars only
+- a server-side scope check runs before every full agent run
 
-- a hosted AI backend without maintaining your own infra
-- a single service that can sit behind your app or API gateway
-- durable Postgres storage for sessions, memos, tools, knowledge, and secrets
-- a template you can fork and customize for app-specific agents
+A fresh Railway deploy is not an open public playground unless you loosen it deliberately.
 
-## Important Production Behavior
+## 1. Deploy
 
-On Railway, you should treat this as a production deployment unless you are intentionally running a private staging instance.
+Click the Railway deploy button or connect the repo manually. Railway builds and starts the app automatically.
 
-Current defaults:
+## 2. Attach durable storage
 
-- production mode requires auth for user routes by default
-- admin/config routes are closed by default in production
-- `fetch_page` and `json_request` are constrained by each agent's `networkPolicy`
-- builtin outbound HTTP blocks localhost and private-network SSRF targets
-- secret resolution uses registered secrets or safely-prefixed env vars only
-- the backend performs a server-side scope check before the full agent run
+Do this before relying on runtime-configured knowledge, tools, secrets, sessions, or memos.
 
-This means a fresh Railway deploy is not meant to be an open public playground unless you deliberately loosen it.
+- add a Railway Postgres service and set `DATABASE_URL`, or
+- point `DATABASE_URL` at Supabase/Postgres you already manage
 
-## Recommended Railway Setup
+Without it, restarts lose file-backed knowledge/tools/secrets, and in-memory sessions/memos do not survive.
 
-### 1. Deploy the template
-
-Use the Railway deploy button or connect the repo manually.
-
-Railway will build and start the app automatically.
-
-### 2. Attach durable storage
-
-Do this before you rely on runtime-configured knowledge, tools, secrets, sessions, or memos.
-
-Recommended:
-
-- add a Railway Postgres service and set `DATABASE_URL`
-- or point `DATABASE_URL` to Supabase/Postgres you already manage
-
-Without durable storage, Railway redeploys or restarts can lose file-backed knowledge/tools/secrets, and in-memory sessions/memos will not survive restarts.
-
-### 3. Set required environment variables
+## 3. Set env vars
 
 Minimum:
 
@@ -87,36 +60,26 @@ DATABASE_URL=postgresql://...
 ADMIN_API_KEY=replace-me
 ```
 
-### 4. Choose an auth mode
+Set `CONFIG_ENV` explicitly per deployment (e.g. `staging`, `production`) so release promotion has a stable target.
 
-Clawless supports two main production patterns.
+## 4. Choose an auth mode
 
-#### Option A: Trusted upstream app/backend
-
-Use this if your own backend or edge layer authenticates the user and forwards trusted identity to Clawless.
+**Trusted upstream (your backend authenticates, forwards user id):**
 
 ```bash
 AUTH_TRUSTED_USER_HEADER=x-user-id
 ```
 
-Important:
+Only use this when requests come through a trusted server/gateway you control. Do not expose a public browser path where clients can set this header themselves.
 
-- only use this if requests to Clawless come through a trusted server or gateway you control
-- do not expose a public browser path where clients can set this header themselves
-
-#### Option B: JWT / JWKS verification
-
-Use this if the client talks to Clawless directly and you want Clawless to verify bearer tokens itself.
+**JWT / JWKS (Clawless verifies bearer tokens directly):**
 
 ```bash
 AUTH_JWKS_URL=https://<project>.supabase.co/auth/v1/.well-known/jwks.json
 # or
 AUTH_JWT_SECRET=...
-```
 
-Optional JWT settings:
-
-```bash
+# optional
 AUTH_JWT_ISSUER=...
 AUTH_JWT_AUDIENCE=...
 AUTH_USER_ID_CLAIM=sub
@@ -124,255 +87,114 @@ AUTH_ADMIN_ROLE_CLAIM=role
 AUTH_ADMIN_ROLE_VALUES=service_role,admin
 ```
 
-## Testing Before Real Auth
-
-If you want to test the template quickly before wiring production auth, do it on a private staging deployment only.
-
-You can temporarily use:
+**Staging-only bypass** (private deployment only — never on public prod):
 
 ```bash
 CLAWLESS_MODE=development
 AUTH_REQUIRED=false
 ```
 
-In that mode:
+## Configuring The Agent
 
-- `userId` can be provided directly in requests
-- admin/config routes stay open unless you configure admin/auth credentials
+Edit `clawless.config.ts` so the shipped agent matches your product. For focused app backends:
 
-Do not keep this setup on a public production deployment.
-
-## Configuring The Agent For Your App
-
-Update `clawless.config.ts` so the shipped agent matches your product.
-
-For focused application backends:
-
-- define clear `instructions`
-- set `guardrails.domain`
-- set `guardrails.outOfScopeMessage`
-- keep `guardrails.hideInternalDetails` enabled
-- keep `networkPolicy.mode` as `contextual` unless you intentionally want open-web behavior
-- add `outputSchema` if your frontend expects cards, tables, timelines, forms, filters, actions, or citations
+- clear `instructions`
+- `guardrails.domain` + `guardrails.outOfScopeMessage`
+- keep `guardrails.hideInternalDetails` on
+- keep `networkPolicy.mode: "contextual"` unless you want open-web
+- add `outputSchema` if your frontend renders cards/tables/timelines/forms/filters/actions/citations
+- register custom block types with `registerBlock()` for charts, maps, mermaid, kanban, code-diff, etc.
 - prefer app-specific tools over generic browsing
 
-Example:
-
-```ts
-export const shoppingAssistant = defineAgent({
-  name: "shopping-assistant",
-  instructions: "You help customers browse products, compare items, and answer store-related questions.",
-  guardrails: {
-    domain: "shopping help for this store",
-    outOfScopeMessage: "I can only help with shopping-related questions for this store.",
-    hideInternalDetails: true,
-  },
-  networkPolicy: {
-    mode: "contextual",
-  },
-  outputSchema: {
-    mode: "required",
-    allowedBlocks: ["cards", "actions", "citations"],
-    preferredBlocks: ["cards", "actions"],
-    requiredBlocks: ["cards", "actions"],
-    requireCitations: true,
-    onInvalid: "reject",
-  },
-  tools: [
-    searchCatalogTool,
-    getProductDetailsTool,
-    checkInventoryTool,
-  ],
-});
-```
+See `README.md` → "Structured Output", "Custom UI Blocks", and the shopping-assistant example.
 
 ## Runtime Configuration From Your App
 
-Once deployed, your app can configure agents, tools, knowledge, and secrets through admin routes.
-
-Use the admin key for setup/config operations:
+Configure tools, knowledge, and secrets through admin routes using the admin key:
 
 ```bash
 curl -X POST https://your-app.up.railway.app/api/setup \
   -H "Content-Type: application/json" \
   -H "x-clawless-admin-key: replace-me" \
   -d '{
-    "secrets": [
-      { "key": "MY_API_KEY", "value": "..." }
-    ],
-    "tools": [
-      {
-        "agent": "shopping-assistant",
-        "name": "search_items",
-        "description": "Search store items",
-        "url": "https://api.example.com/search",
-        "method": "GET",
-        "parameters": {
-          "q": { "type": "string", "description": "Search query", "required": true }
-        },
-        "auth": {
-          "queryParams": { "api_key": "MY_API_KEY" }
-        }
-      }
-    ],
-    "knowledge": [
-      {
-        "agent": "shopping-assistant",
-        "title": "Store Policy",
-        "content": "Use https://docs.example.com/store-policy for shipping and return policy rules.",
-        "priority": 10
-      }
-    ]
+    "secrets": [{ "key": "MY_API_KEY", "value": "..." }],
+    "tools": [{
+      "agent": "shopping-assistant",
+      "name": "search_items",
+      "description": "Search store items",
+      "url": "https://api.example.com/search",
+      "parameters": { "q": { "type": "string", "description": "Search query", "required": true } },
+      "auth": { "queryParams": { "api_key": "MY_API_KEY" } }
+    }],
+    "knowledge": [{
+      "agent": "shopping-assistant",
+      "title": "Store Policy",
+      "content": "See https://docs.example.com/store-policy for shipping and returns.",
+      "priority": 10
+    }]
   }'
 ```
 
 Notes:
 
-- if `agent` is omitted on tools or knowledge, Clawless assigns them to the first configured agent
-- URLs inside knowledge can widen the contextual outbound allowlist for builtin HTTP tools
-- do not put secrets into knowledge
-- runtime-managed agents, tools, and knowledge now write to the target environment draft first
-- publish with `POST /api/config/publish` once the draft is ready
-- promote with `POST /api/config/promote` to move a validated release between environments
-- if the agent has large docs or product catalogs, configure `retrieval` on the agent instead of injecting everything as static knowledge
+- omitted `agent` → assigned to the first configured agent
+- URLs in knowledge widen the contextual outbound allowlist for builtin HTTP tools
+- never put secrets in knowledge
+- runtime changes write to the target environment's `draft`; publish with `POST /api/config/publish`
+- for large docs/catalogs, configure `retrieval` on the agent instead of injecting everything as static knowledge
 
-## Draft / Publish Workflow
-
-Recommended Railway setup:
+## Draft / Publish / Promote
 
 - staging deployment: `CONFIG_ENV=staging`, `CONFIG_STAGE=published`
 - production deployment: `CONFIG_ENV=production`, `CONFIG_STAGE=published`
-- local/dev: let Clawless use the default draft stage
 
 Typical flow:
 
-1. write changes into `staging` draft through `/api/agents`, `/api/tools`, `/api/knowledge`, or `/api/setup`
+1. write changes to the `staging` draft (`/api/agents|tools|knowledge|setup`)
 2. `POST /api/config/publish` for `staging`
-3. validate the staging deployment
+3. validate
 4. `POST /api/config/promote` from `staging` to `production` with `"publish": true`
-
-This keeps operational changes reversible and avoids editing the live production snapshot directly.
 
 ## Making User Requests
 
-### With trusted upstream header
+Trusted-header mode:
 
 ```bash
 curl -X POST https://your-app.up.railway.app/api/agent \
   -H "Content-Type: application/json" \
   -H "x-user-id: user-123" \
-  -d '{
-    "agent": "shopping-assistant",
-    "prompt": "Find me lightweight waterproof hiking shoes"
-  }'
+  -d '{ "agent": "shopping-assistant", "prompt": "Find waterproof hiking shoes" }'
 ```
 
-### With bearer token auth
+Bearer mode:
 
 ```bash
 curl -X POST https://your-app.up.railway.app/api/agent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <jwt>" \
-  -d '{
-    "agent": "shopping-assistant",
-    "prompt": "Find me lightweight waterproof hiking shoes"
-  }'
+  -d '{ "agent": "shopping-assistant", "prompt": "Find waterproof hiking shoes" }'
 ```
 
-In production, normal users should not need to provide `userId` manually if auth is configured correctly.
-
-## Railway-Specific Notes
-
-- set `CORS_ORIGIN` to your real frontend domain
-- keep `NODE_ENV=production`
-- prefer Railway Postgres or external Postgres/Supabase for durable state
-- use `ADMIN_API_KEY` even if you also use JWT auth, because it keeps operational setup simple
-- if you need env-backed secrets, expose them with the safe prefix `CLAWLESS_SECRET_` by default
-- set `CONFIG_ENV` explicitly per deployment so release promotion has a stable target
-
-## When To Use `fetch_page` And `json_request`
-
-These builtins stay useful on Railway, but they are no longer meant to be unrestricted internet tools.
-
-Recommended:
-
-- keep `networkPolicy.mode` as `contextual`
-- let outbound hosts come from your real app tools and knowledge URLs
-- add `networkPolicy.allowHosts` only for hosts you explicitly trust
-
-Use `networkPolicy.mode: "open"` only for agents that are intentionally built for broad web access.
+In production, normal users should not need to send `userId` manually — auth provides it.
 
 ## Common Failure Modes
 
-### Knowledge or tools disappear after redeploy
+| Symptom | Cause | Fix |
+|---|---|---|
+| Knowledge/tools lost after redeploy | no durable storage | set `DATABASE_URL` |
+| Setup changes not visible in prod | serving `published`, changes still in `draft` | `POST /api/config/publish` (or check `CONFIG_STAGE`) |
+| `/api/setup` or `/api/capabilities` returns 401/403 | admin protection working as intended | send `x-clawless-admin-key: <ADMIN_API_KEY>` or JWT admin role |
+| User request fails `Authentication is required` | auth enforced, but no identity forwarded | configure `AUTH_TRUSTED_USER_HEADER` or JWT/JWKS |
+| Agent refuses out-of-scope prompts | server-side scope check active | adjust `instructions` / `guardrails.domain`; avoid generic agent config for a product-specific backend |
 
-Cause:
+## Intended Production Shape
 
-- no durable Postgres storage configured
-
-Fix:
-
-- set `DATABASE_URL`
-
-### Setup changes do not appear in production
-
-Cause:
-
-- the deployment is serving `published`, but your changes are still only in draft
-
-Fix:
-
-- `POST /api/config/publish` for that environment
-- or confirm `CONFIG_STAGE` if this is a staging/dev deployment
-
-### `/api/setup`, `/api/providers`, or `/api/capabilities` returns 401/403
-
-Cause:
-
-- production admin protection is working
-
-Fix:
-
-- provide `x-clawless-admin-key: <ADMIN_API_KEY>`
-- or use an authenticated admin JWT role if you configured JWT admin claims
-
-### User requests fail with `Authentication is required`
-
-Cause:
-
-- production auth is working, but your app is not forwarding trusted identity or bearer tokens
-
-Fix:
-
-- configure `AUTH_TRUSTED_USER_HEADER` behind a trusted backend, or
-- configure JWT/JWKS auth and send bearer tokens
-
-### Agent refuses out-of-scope prompts
-
-Cause:
-
-- scope enforcement is active and the prompt does not fit the configured agent role
-
-Fix:
-
-- adjust `instructions` / `guardrails.domain` if the refusal is wrong
-- do not use a generic assistant config for a product-specific app backend
-
-## Railway Template Summary
-
-For the Railway template, the intended production shape is:
-
-- Railway app for the Clawless service
+- Railway app running Clawless
 - Railway Postgres or external Postgres/Supabase
-- your own frontend or backend calling Clawless
-- auth configured
-- `ADMIN_API_KEY` configured
-- app-specific agent instructions, guardrails, tools, knowledge, and `networkPolicy`
+- your own frontend/backend calling Clawless
+- auth + `ADMIN_API_KEY` configured
+- app-specific `instructions`, `guardrails`, `tools`, `knowledge`, `networkPolicy`
+- `outputSchema` (plus custom blocks via `registerBlock`) if your frontend renders rich UI
+- `retrieval` if you have a large policy corpus, catalog, or knowledge base
 
-If you keep those pieces in place, the Railway template is a solid base for an app-specific AI backend rather than a generic public chatbot.
-
-If your app frontend renders rich UI, pair the template with `outputSchema` so the backend can return validated structured output instead of forcing the client to infer cards, tables, or actions from plain text. Tool results also carry canonical `ui` payloads now, so frontends can render intermediate API/search results without scraping raw JSON strings from `tool_end`.
-
-If your product needs UI blocks that aren't in the shipped set (charts, maps, mermaid diagrams, kanban, code diffs, etc.), register custom block types in `clawless.config.ts` with `registerBlock()`. They become valid targets in `outputSchema.allowedBlocks/preferredBlocks/requiredBlocks`, are advertised to the agent through the `present_output` tool, and can auto-adapt from matching tool JSON. See the "Custom UI Blocks" section in `README.md` for the full shape and a chart example.
-
-If your app has a large policy corpus, product catalog, or knowledge base, pair the template with `retrieval`. The built-in indexed knowledge retriever can search knowledge chunks per request, and code-registered retrievers let you plug in external RAG/vector backends without changing the request API.
+Keep those pieces in place and the template is a solid base for an app-specific AI backend rather than a generic public chatbot.
